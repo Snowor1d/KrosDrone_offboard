@@ -34,7 +34,7 @@ def euler_from_quaternion(w, x, y, z):
 
 #이륙 후 x방향으로 5 이동, 속도 0.5m/s
 WAYPOINTS =[
-    {"x" : 0, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0.1},
+    {"x" : 0, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0.1},
     {"x" : 5, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0.1},
     {"x" : 5, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0.1}
 ]

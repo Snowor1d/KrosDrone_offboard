@@ -44,7 +44,7 @@ WAYPOINTS =[
     {"x" : 5, "y" : 5, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0.1},
     {"x" : 0, "y" : 5, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1.5, "stop_seconds" : 0.1},
     {"x" : 0, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1.5, "stop_seconds" : 0.1},
-    {"x" : 0, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0}
+    {"x" : 0, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0}
 ]
 
 #WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
