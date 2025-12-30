@@ -10,7 +10,7 @@ import numpy as np
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
 NAN = float('nan')
-TAKEOFF_HEIGHT = -2
+TAKEOFF_HEIGHT = -3
 
 def wrap_to_pi(a: float) -> float:
     """wrap angle to [-pi, pi]."""
@@ -32,16 +32,12 @@ def euler_from_quaternion(w, x, y, z):
     yaw_z = math.atan2(t3, t4)
     return yaw_z
 
+#이륙 후 x방향으로 5 이동, 속도 0.5m/s
 WAYPOINTS =[
     {"x" : 0, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0.1},
-    {"x" : 2, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.3, "stop_seconds" : 0.1},
-    {"x" : 3, "y" : 3, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.8, "stop_seconds" : 10},
-    {"x" : 0, "y" : 5, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1.5, "stop_seconds" : 0.1},
-    {"x" : -5, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 2, "stop_seconds" : 0.1},
-    {"x" : -5, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0}
+    {"x" : 5, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0.1},
+    {"x" : 5, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 0.5, "stop_seconds" : 0.1}
 ]
-
-#WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
 
 
 
