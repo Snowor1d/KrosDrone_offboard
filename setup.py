@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'trajectory_planning'
+package_name = 'offboard'
 
 setup(
     name=package_name,
@@ -20,10 +20,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'offboard_control_py = trajectory_planning.offboard_control:main',
-            'hovering = trajectory_planning.Hovering:main',
-            'waypoint1 = trajectory_planning.Waypoint1:main',
-            'waypoint2 = trajectory_planning.Waypoint2:main',
+            'offboard_control_py = offboard.offboard_control:main',
+            'hovering = offboard.Hovering:main',
+            'waypoint1 = offboard.Waypoint1:main',
+            'waypoint2 = offboard.Waypoint2:main',
         ],
     },
 )
