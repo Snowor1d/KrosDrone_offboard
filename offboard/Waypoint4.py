@@ -34,13 +34,15 @@ def euler_from_quaternion(w, x, y, z):
     yaw_z = math.atan2(t3, t4)
     return yaw_z
 
-MAIN_WAYPOINT = {"x" : 1, "y" : 0, "z" : 0}
+MAIN_WAYPOINT = {"x" : 500, "y" : 0, "z" : 0}
 
 #NED 기준. yaw방향은 시작위치 -> MAIN_WAYPOINT 방향이 0.0.
 WAYPOINTS = [
     {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
-    {"x": 3,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 0.5, "stop_seconds": 0.1},
-    {"x": 3,  "y": 0,  "z": 0,              "yaw": math.radians(0), "speed": 0.5, "stop_seconds": 0.1},
+    {"x": 6,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 1.5, "stop_seconds": 0.1},
+    {"x": 6,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 1.5, "stop_seconds": 0.1},
+    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 1.5, "stop_seconds": 0.1},
+    {"x": 0, "y": 0,  "z": 0,              "yaw": math.radians(180),"speed": 0.5, "stop_seconds": 0.1},
 ]
 
 #WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
@@ -298,13 +300,23 @@ class OffboardControl(Node):
             return
 
         wp = WAYPOINTS[self.waypoint_count]
-        self.goto_waypoint(
-            wp["x"] + self.init_x,
-            wp["y"] + self.init_y,
-            wp["z"] + self.init_z,
-            wp["speed"],
-            wp["yaw"] 
-        )
+        if (self.waypoint_count != 0):
+            self.goto_waypoint(
+                wp["x"] + self.init_x,
+                wp["y"] + self.init_y,
+                wp["z"] + self.init_z,
+                wp["speed"],
+                wp["yaw"] 
+            )
+        else:
+            self.goto_waypoint(
+                wp["x"] + self.init_x,
+                wp["y"] + self.init_y,
+                wp["z"] + self.init_z,
+                wp["speed"],
+                wp["yaw"],
+                slow_radius = 0
+            )
         
         if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5:
             self._log("LAND_CMD")
@@ -409,14 +421,15 @@ class OffboardControl(Node):
 
         self.trajectory_setpoint_publisher.publish(msg)
     
-    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel):
+    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel, slow_radius = -1):
         # 1) align yaw (with control yaw speed)
         # 2) move to target based on distance feedback
 
         yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
-        
-        self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
-
+        if slow_radius == -1:
+            self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
+        else:
+            self.slow_radius = slow_radius
         
         cx = float(self.vehicle_odom.position[0])
         cy = float(self.vehicle_odom.position[1])

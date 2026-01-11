@@ -6,6 +6,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus, VehicleOdometry
 import math
 import numpy as np
+import os, time
+from datetime import datetime
 
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
@@ -32,13 +34,16 @@ def euler_from_quaternion(w, x, y, z):
     yaw_z = math.atan2(t3, t4)
     return yaw_z
 
-WAYPOINTS =[
-    {"x" : 0, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0.1},
-    {"x" : 2, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.3, "stop_seconds" : 0.1},
-    {"x" : 3, "y" : 3, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 0.8, "stop_seconds" : 10},
-    {"x" : 0, "y" : 5, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 1.5, "stop_seconds" : 0.1},
-    {"x" : -5, "y" : 0, "z" : TAKEOFF_HEIGHT, "yaw_mode" : 1, "speed" : 2, "stop_seconds" : 0.1},
-    {"x" : -5, "y" : 0, "z" : 0, "yaw_mode" : 1, "speed" : 1, "stop_seconds" : 0}
+MAIN_WAYPOINT = {"x" : 1, "y" : 0, "z" : 0}
+
+#NED 기준. yaw방향은 시작위치 -> MAIN_WAYPOINT 방향이 0.0.
+WAYPOINTS = [
+    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 2,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 0.3, "stop_seconds": 0.1},
+    {"x": 3,  "y": 3,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(45), "speed": 0.8, "stop_seconds": 10},
+    {"x": 0,  "y": 5,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90), "speed": 1.5, "stop_seconds": 0.1},
+    {"x": -5, "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180),"speed": 2.0, "stop_seconds": 0.1},
+    {"x": -5, "y": 0,  "z": 0,              "yaw": math.radians(180),"speed": 1.0, "stop_seconds": 0.0},
 ]
 
 #WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
@@ -123,6 +128,37 @@ class OffboardControl(Node):
 
         # Create a timer to publish control commands
         self.timer = self.create_timer(0.1, self.timer_callback)
+
+        
+        self.hold_active = False
+        self.hold_x = self.hold_y = self.hold_z = 0.0
+        self.hold_yaw = 0.0
+
+        
+        self.ref_yaw = 0.0
+        self.init_yaw = 0.0
+        self.init_ready = False
+        self.offboard_engaged = False
+
+        self._setup_logger()
+
+    def _setup_logger(self):
+        home = os.path.expanduser("~")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_path = os.path.join(home, f"kros_offboard_{ts}.txt")
+        self._log_fp = open(self.log_path, "w", buffering=1)
+        self._log("START", extra=f"log_path={self.log_path}")
+
+    def _log(self, tag: str, extra: str = ""):
+        # ROS time 대신 wall time이 더 직관적이면 time.time() 사용
+        t = time.time()
+        cx = float(getattr(self.vehicle_odom, "position", [0,0,0])[0])
+        cy = float(getattr(self.vehicle_odom, "position", [0,0,0])[1])
+        cz = float(getattr(self.vehicle_odom, "position", [0,0,0])[2])
+        line = (f"{t:.3f} | {tag} | wp={self.waypoint_count}/{len(WAYPOINTS)-1} "
+                f"| pos=({cx:.2f},{cy:.2f},{cz:.2f}) yaw={self.now_yaw:.3f} "
+                f"| hold={int(self.hold_active)} | {extra}\n")
+        self._log_fp.write(line)
 
     def _as_pos3(self, x, y, z, tag="pos"):
         px, py, pz = float(x), float(y), float(z)
@@ -228,65 +264,105 @@ class OffboardControl(Node):
         """Callback function for the timer."""
         #self.publish_offboard_control_heartbeat_signal(False)
         #print(self.offboard_setpoint_counter)
+        if not self.init_ready:
+            self.publish_offboard_control_heartbeat_signal(True)
+            cx = float(self.vehicle_odom.position[0])
+            cy = float(self.vehicle_odom.position[1])
+            cz = float(self.vehicle_odom.position[2])
+            self.publish_position_setpoint(cx, cy, cz, yaw=self.now_yaw)
+        elif self.init_ready and self.offboard_setpoint_counter < 10:
+            self.publish_offboard_control_heartbeat_signal(True)
+            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z, self.init_yaw)
 
-        if self.offboard_setpoint_counter == 10:
+        if self.offboard_setpoint_counter == 10 and not self.offboard_engaged:
             self.engage_offboard_mode()
             self.arm()
+            self.offboard_engaged = True
+            self._log("OFFBOARD_ARM")
         if self.offboard_setpoint_counter < 11:
             self.offboard_setpoint_counter += 1
 
         
-        if self.offboard_setpoint_counter < 10:
+        if not self.init_ready:
             return
         
+
         if (self.takeoff == 0):
             self.publish_offboard_control_heartbeat_signal(True)
-            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z+self.takeoff_height)
-            if(self.vehicle_odom.position[2] < self.init_z + self.takeoff_height):
+            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z+self.takeoff_height, yaw=self.init_yaw)
+            if(self.vehicle_odom.position[2] < self.init_z + self.takeoff_height + 0.3):
                 self.takeoff = 1
+                self._log("TAKEOFF_DONE")
             return
+        
+        if self.waypoint_count >= len(WAYPOINTS):
+            self._log("MISSION_DONE")
+            self.land()
+            return
+
+        wp = WAYPOINTS[self.waypoint_count]
+        if (self.waypoint_count != 0):
+            self.goto_waypoint(
+                wp["x"] + self.init_x,
+                wp["y"] + self.init_y,
+                wp["z"] + self.init_z,
+                wp["speed"],
+                wp["yaw"] 
+            )
+        else:
+            self.goto_waypoint(
+                wp["x"] + self.init_x,
+                wp["y"] + self.init_y,
+                wp["z"] + self.init_z,
+                wp["speed"],
+                wp["yaw"],
+                slow_radius = 0
+            )
+        
+        if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5:
+            self._log("LAND_CMD")
+            self.land()
+            exit(0)
         #if self.vehicle_local_position.z > self.takeoff_height and self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
         #self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
 
-        self.goto_waypoint(WAYPOINTS[self.waypoint_count]['x']+self.init_x, WAYPOINTS[self.waypoint_count]['y']+self.init_y, WAYPOINTS[self.waypoint_count]['z']+self.init_z, WAYPOINTS[self.waypoint_count]['speed'], WAYPOINTS[self.waypoint_count]['yaw_mode'])
-        
-        #self.goto_waypoint(0, 0, -5, 0.3, 0)
-        
-
-        if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5 :
-            self.land()
-            self.is_land = 1
-            exit(0)
-        
-
 
     def vehicle_odom_callback(self, vehicle_odom):
-        if(self.offboard_setpoint_counter == 10):
-            self.init_x = self.vehicle_odom.position[0]
-            self.init_y = self.vehicle_odom.position[1]
-            self.init_z = self.vehicle_odom.position[2]
         self.vehicle_odom = vehicle_odom
-
         self.now_yaw = euler_from_quaternion(
             self.vehicle_odom.q[0], self.vehicle_odom.q[1],
             self.vehicle_odom.q[2], self.vehicle_odom.q[3]
         )
+        if self.offboard_setpoint_counter >= 10 and not self.init_ready:
+            self.init_x = self.vehicle_odom.position[0]
+            self.init_y = self.vehicle_odom.position[1]
+            self.init_z = self.vehicle_odom.position[2]
+        
+            self.ref_yaw = math.atan2(MAIN_WAYPOINT['y'] - self.init_y, 
+                                       MAIN_WAYPOINT['x'] - self.init_x)
+            self.init_yaw = self.now_yaw
+                
+            self._log("INIT",
+                    extra=f"init=({self.init_x:.2f},{self.init_y:.2f},{self.init_z:.2f}) "
+                            f"init_yaw={self.init_yaw:.3f} rad")
+            self.init_ready =True
+
 
     def publish_yaw_with_hovering(self, x: float, y: float, z: float, yaw_target: float):
         # position control heartbeat
         self.publish_offboard_control_heartbeat_signal(True)
 
         # 현재 yaw
-        cur_yaw = euler_from_quaternion(
-            self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-            self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-        )
+        # cur_yaw = euler_from_quaternion(
+        #     self.vehicle_odom.q[0], self.vehicle_odom.q[1],
+        #     self.vehicle_odom.q[2], self.vehicle_odom.q[3]
+        # )
 
-        # 목표 yaw까지 천천히
-        err = angle_diff(yaw_target, cur_yaw)
-        max_step = float(self.yaw_rate_limit) * float(self.dt)
-        step = max(-max_step, min(max_step, err))
-        yaw_cmd = float(wrap_to_pi(cur_yaw + step))
+        # # 목표 yaw까지 천천히
+        # err = angle_diff(yaw_target, cur_yaw)
+        # max_step = float(self.yaw_rate_limit) * float(self.dt)
+        # step = max(-max_step, min(max_step, err))
+        # yaw_cmd = float(wrap_to_pi(cur_yaw + step))
         #self.previous_yaw = yaw_cmd
 
         msg = TrajectorySetpoint()
@@ -297,13 +373,13 @@ class OffboardControl(Node):
         msg.acceleration = [NAN, NAN, NAN]
         msg.jerk = [NAN, NAN, NAN]
 
-        msg.yaw = yaw_cmd
+        msg.yaw = yaw_target
         msg.yawspeed = NAN  # yaw로 직접 제어
 
         self.trajectory_setpoint_publisher.publish(msg)
 
     def publish_velocity_setpoint(self, t_x: float, t_y: float, t_z: float,
-                                v: float, yaw_mode: float):
+                                v: float, yaw_target: float):
         cx = float(self.vehicle_odom.position[0])
         cy = float(self.vehicle_odom.position[1])
         cz = float(self.vehicle_odom.position[2])
@@ -316,17 +392,13 @@ class OffboardControl(Node):
         #print(dist)
 
         #desired yaw
-        if (abs(dx) + abs(dy)) > 1:
-            desired_yaw = math.atan2(dy, dx)
-        else:
-            desired_yaw = float(self.previous_yaw)
 
-        # raw velocity vector
         if dist < 1e-6 or v <= 0.0:
             v_vec = np.zeros(3, dtype=float)
         else:
             dir_vec = np.array([dx, dy, dz], dtype=float) / dist
             v_vec = dir_vec * float(v)
+
 
         # slew limit on velocity vector change
         dv_max = float(self.v_slew) * float(self.dt)  # m/s per tick
@@ -335,24 +407,6 @@ class OffboardControl(Node):
         if dv_norm > dv_max and dv_norm > 1e-9:
             v_vec = self.prev_v_vec + dv * (dv_max / dv_norm)
         self.prev_v_vec = v_vec
-
-        # yaw command
-        if yaw_mode == 0:
-            yaw_cmd = float(self.previous_yaw)
-            yawspeed_cmd = NAN
-        else:
-            cur_yaw = euler_from_quaternion(
-                self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-                self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-            )
-            err = angle_diff(desired_yaw, cur_yaw)
-
-            max_step = float(self.yaw_rate_limit) * float(self.dt)
-            step = max(-max_step, min(max_step, err))
-            yaw_cmd = float(wrap_to_pi(cur_yaw + step))
-            #self.previous_yaw = yaw_cmd
-
-            yawspeed_cmd = NAN
 
         # publish (velocity control)
         msg = TrajectorySetpoint()
@@ -363,20 +417,20 @@ class OffboardControl(Node):
         msg.acceleration = [NAN, NAN, NAN]
         msg.jerk = [NAN, NAN, NAN]
 
-        msg.yaw = float(yaw_cmd)
-        msg.yawspeed = yawspeed_cmd
+        msg.yaw = float(yaw_target)
+        msg.yawspeed = NAN
 
         self.trajectory_setpoint_publisher.publish(msg)
     
-    def goto_waypoint(self, to_x, to_y, to_z, v_max, yaw_mode):
+    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel, slow_radius=-1):
         # 1) align yaw (with control yaw speed)
         # 2) move to target based on distance feedback
-        
-        self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
 
-        if self.is_new_go == 1:
-            self.get_logger().info(f"To {[to_x, to_y, to_z]}, at {v_max}m/s")
-            self.is_new_go = 0
+        yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
+        if (slow_radius == -1):
+            self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
+        else:
+            self.slow_radius = slow_radius
         
         cx = float(self.vehicle_odom.position[0])
         cy = float(self.vehicle_odom.position[1])
@@ -388,10 +442,15 @@ class OffboardControl(Node):
         
         dist = math.sqrt(dx*dx + dy*dy + dz*dz)
         self.distance_target = dist
+        yaw_err = abs(angle_diff(yaw_target, self.now_yaw))
+        if dist < self.waypoint_range and yaw_err > self.yaw_tol:
+            self.publish_yaw_with_hovering(to_x, to_y, to_z, yaw_target)
+            self._log("ALIGN_YAW", extra=f"yaw_err={yaw_err:.3f} tol={self.yaw_tol:.3f}")
+            return
         
 
         stop_sec = WAYPOINTS[self.waypoint_count]['stop_seconds']
-        if (dist < self.waypoint_range):
+        if (dist < self.waypoint_range and yaw_err <= self.yaw_tol):
 
             if not self.is_stopping:
                 self.is_stopping = True
@@ -399,123 +458,67 @@ class OffboardControl(Node):
                 self.get_logger().info(
                     f"Waypoint {self.waypoint_count}: stopping for {stop_sec} sec"
                 )
-            self.hover_here(to_x, to_y, to_z)
+                self.hold_active = True
+                self.hold_x = to_x
+                self.hold_y = to_y
+                self.hold_z = to_z
+                self.hold_yaw = yaw_target 
+                self._log("WP_ARRIVE",
+                      extra=f"hold=({self.hold_x:.2f},{self.hold_y:.2f},{self.hold_z:.2f}) "
+                            f"hold_yaw={self.hold_yaw:.3f} stop={stop_sec}")
+
+            self.hover_here()
 
             elapsed = (self.get_clock().now() - self.stop_start_time).nanoseconds * 1e-9
             if elapsed >= stop_sec:
                 #print("들어옴")
+                self._log("WP_DEPART", extra=f"elapsed={elapsed:.2f}")
                 self.is_stopping = False
                 self.stop_start_time = None
-                self.is_new_go = 1
+                self.hold_active = False
+
                 self.waypoint_count += 1
-                self.goto_phase = "ALIGN"
-                self.yaw_hold_cnt = 0
-                self.dist_i = 0
                 self.prev_v_vec[:] = 0.0
             return
-        else:
-            self.is_stopping = False
-            self.stop_start_time = None
-
-
-        if (abs(dx)+abs(dy)) > 1:
-            desired_yaw = math.atan2(dy, dx)
-        else:
-            desired_yaw = float(self.now_yaw)
-            self.goto_phase = "GOTO"
-            self.yaw_hold_cnt = 0
-            self.dist_i = 0.0
-            self.prev_v_vec[:] = 0.0
-
         
-        self.publish_offboard_control_heartbeat_signal(False)
-        # if self.vehicle_status.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-        #     return
-        
-        #yaw align
-        if yaw_mode != 0 and self.goto_phase == "ALIGN": # 처음 takeoff 할때는 align 할 필요 없음
-            cur_yaw = euler_from_quaternion(
-                self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-                self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-            )
-            # if(self.waypoint_count == 0):
-            #     desired_yaw = cur_yaw
-            err = angle_diff(desired_yaw, cur_yaw)
+        self.is_stopping = False
+        self.stop_start_time = None
+        self.hold_active = False
 
-            # yaw rate limit
-            max_step = float(self.yaw_rate_limit) * float(self.dt)
-            step = max(-max_step, min(max_step, err))
-            yaw_cmd = float(wrap_to_pi(cur_yaw + step))
-            #self.previous_yaw = yaw_cmd
-            
-
-            # fix location when yaw align
-            #self.publish_offboard_control_heartbeat_signal(True)  # position control
-            self.publish_yaw_with_hovering(cx, cy, cz, yaw_cmd)
-
-            if abs(err) < self.yaw_tol:
-                self.yaw_hold_cnt += 1
-            else:
-                self.yaw_hold_cnt = 0
-
-            if self.yaw_hold_cnt >= self.yaw_hold_ticks:
-                self.previous_yaw = self.now_yaw
-                self.goto_phase = "GOTO"
-                self.yaw_hold_cnt = 0
-                self.dist_i = 0.0
-                self.prev_v_vec[:] = 0.0
-
-            return 
-
-        # yaw_mode==0 -> skip yaw align
-        if yaw_mode == 0:
-            self.goto_phase = "GOTO"
-
-        # =========================================================
-        # PHASE 1: MOVE (feedback speed control)
-        # =========================================================
-
-        # distance feedback
-        # v_cmd = float(self.kP_dist) * dist
-
-        # if self.kI_dist > 0.0:
-        #     self.dist_i += dist * self.dt
-        #     self.dist_i = max(-self.dist_i_limit, min(self.dist_i_limit, self.dist_i))
-        #     v_cmd += float(self.kI_dist) * self.dist_i
-        v_cmd = v_max
-        # decrease speed
+        v_cmd = float(v_max)
         if dist < float(self.slow_radius):
             v_cmd *= (dist / float(self.slow_radius))
-
-        # saturate
         v_cmd = max(0.0, min(float(v_max), v_cmd))
         if dist > self.waypoint_range:
             v_cmd = max(float(self.v_min), v_cmd)
-        #print("명령 속도 : ", v_cmd)
-        
 
-        self.publish_velocity_setpoint(to_x, to_y, to_z, float(v_cmd), float(yaw_mode))
-        
-        # if(self.waypoint_count == (len(WAYPOINTS)-1) and self.is_departed and self.vehicle_odom.position[2] > -0.5):
-        #     self.disarm()
+        self.publish_offboard_control_heartbeat_signal(False)
+        self.publish_velocity_setpoint(to_x, to_y, to_z, v_cmd, yaw_target)
 
-    def hover_here(self, x, y, z):
+        self._log("GOTO",
+                extra=f"to=({to_x:.2f},{to_y:.2f},{to_z:.2f}) dist={dist:.2f} v={v_cmd:.2f} yaw_t={yaw_target:.3f}")
+        
+    def hover_here(self):
         #print("hovering 중")
-        cx = float(self.vehicle_odom.position[0])
-        cy = float(self.vehicle_odom.position[1])
-        cz = float(self.vehicle_odom.position[2])
 
         self.publish_offboard_control_heartbeat_signal(True)
-        self.publish_position_setpoint(cx, cy, cz)
+        self.publish_position_setpoint(self.hold_x, self.hold_y, self.hold_z, yaw=self.hold_yaw)
 
 
 def main(args=None) -> None:
     print('Starting offboard control node...')
     rclpy.init(args=args)
     offboard_control = OffboardControl()
-    rclpy.spin(offboard_control)
-    offboard_control.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(offboard_control)
+    finally:
+        try:
+            offboard_control._log("SHUTDOWN")
+            offboard_control._log_fp.close()
+        except Exception:
+            pass
+        offboard_control.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
