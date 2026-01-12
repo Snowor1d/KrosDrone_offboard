@@ -24,6 +24,8 @@ setup(
             'hovering = offboard.Hovering:main',
             'waypoint1 = offboard.Waypoint1:main',
             'waypoint2 = offboard.Waypoint2:main',
+            'waypoint3 = offboard.Waypoint3:main',
+            'waypoint4 = offboard.Waypoint4:main'
         ],
     },
 )

@@ -40,13 +40,13 @@ MAIN_WAYPOINT = {"x" : 500, "y" : 0, "z" : 0}
 WAYPOINTS = [
     {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
      {"x": 4,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
-    {"x": 4,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90),  "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 4,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90), "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 4,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 0,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 0,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(-90), "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(-90), "speed": 0.8, "stop_seconds": 0.1},
-    {"x": 0,  "y": 0,  "z": 0,              "yaw": math.radians(-90), "speed": 0.8, "stop_seconds": 0.1}
+    {"x": 4,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90),  "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 4,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90), "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 4,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 0,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180), "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 0,  "y": 4,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(-90), "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(-90), "speed": 1.0, "stop_seconds": 0.1},
+    {"x": 0,  "y": 0,  "z": 0,              "yaw": math.radians(-90), "speed": 0.5, "stop_seconds": 0.1}
 ]
 
 #WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
