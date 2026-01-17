@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus, VehicleOdometry
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus, VehicleOdometry, VehicleGlobalPosition
 import math
 import numpy as np
 import os, time
@@ -12,8 +12,19 @@ from datetime import datetime
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
 NAN = float('nan')
-TAKEOFF_HEIGHT = -2
+TAKEOFF_HEIGHT = -4
 
+MAIN_GPS_low_left  =  {"lat" : 37.293149, "lon" : 126.974744,    "alt" : 50.0}
+MAIN_GPS_low_right =  {"lat" : 37.293353, "lon" : 126.974786,    "alt" : 50.0}
+MAIN_GPS_high_left =  {"lat" : 37.293196, "lon" : 126.974514,    "alt" : 50.0}
+MAIN_GPS_high_right = {"lat" : 37.293394, "lon" : 126.974565,    "alt" : 50.0}
+
+MAIN_POINT_GPS = {
+    "low_left" : MAIN_GPS_low_left,
+    "low_right" : MAIN_GPS_low_right,
+    "high_left" : MAIN_GPS_high_left,
+    "high_right" : MAIN_GPS_high_right
+}
 def wrap_to_pi(a: float) -> float:
     """wrap angle to [-pi, pi]."""
     while a > math.pi:
@@ -34,14 +45,63 @@ def euler_from_quaternion(w, x, y, z):
     yaw_z = math.atan2(t3, t4)
     return yaw_z
 
-MAIN_WAYPOINT = {"x" : 1, "y" : 0, "z" : 0}
 
-#NED 기준. yaw방향은 시작위치 -> MAIN_WAYPOINT 방향이 0.0.
-WAYPOINTS = [
-    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
-    {"x": 3,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 0.5, "stop_seconds": 0.1},
-    {"x": 3,  "y": 0,  "z": 0,              "yaw": math.radians(0), "speed": 0.5, "stop_seconds": 0.1},
-]
+# =========================
+# GPS -> NED 변환 유틸 (WGS84)
+# =========================
+_WGS84_A = 6378137.0
+_WGS84_E2 = 6.69437999014e-3
+
+def _deg2rad(d): return d * math.pi / 180.0
+
+def geodetic_to_ecef(lat_deg, lon_deg, alt_m):
+    lat = _deg2rad(lat_deg)
+    lon = _deg2rad(lon_deg)
+    s = math.sin(lat)
+    c = math.cos(lat)
+    N = _WGS84_A / math.sqrt(1.0 - _WGS84_E2 * s*s)
+
+    x = (N + alt_m) * c * math.cos(lon)
+    y = (N + alt_m) * c * math.sin(lon)
+    z = (N * (1.0 - _WGS84_E2) + alt_m) * s
+    return np.array([x, y, z], dtype=float)
+
+def ecef_to_ned(ecef, ref_lat_deg, ref_lon_deg, ref_alt_m):
+    ref_ecef = geodetic_to_ecef(ref_lat_deg, ref_lon_deg, ref_alt_m)
+    d = ecef - ref_ecef
+
+    lat = _deg2rad(ref_lat_deg)
+    lon = _deg2rad(ref_lon_deg)
+
+    sL = math.sin(lat); cL = math.cos(lat)
+    sO = math.sin(lon); cO = math.cos(lon)
+
+    # ECEF->NED 회전
+    R = np.array([
+        [-sL*cO, -sL*sO,  cL],
+        [   -sO,     cO, 0.0],
+        [-cL*cO, -cL*sO, -sL]
+    ], dtype=float)
+
+    ned = R @ d
+    return ned  # [north, east, down]
+
+def lla_to_ned(lat_deg, lon_deg, alt_m, ref_lat_deg, ref_lon_deg, ref_alt_m):
+    ecef = geodetic_to_ecef(lat_deg, lon_deg, alt_m)
+    return ecef_to_ned(ecef, ref_lat_deg, ref_lon_deg, ref_alt_m)
+
+
+# MAIN_WAYPOINT = {"x" : 1, "y" : 0, "z" : 0}
+
+# #NED 기준. yaw방향은 시작위치 -> MAIN_WAYPOINT 방향이 0.0.
+# WAYPOINTS = [
+#     {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
+#     {"x": 2,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 0.3, "stop_seconds": 0.1},
+#     {"x": 3,  "y": 3,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(45), "speed": 0.8, "stop_seconds": 10},
+#     {"x": 0,  "y": 5,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90), "speed": 1.5, "stop_seconds": 0.1},
+#     {"x": -5, "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180),"speed": 2.0, "stop_seconds": 0.1},
+#     {"x": -5, "y": 0,  "z": 0,              "yaw": math.radians(180),"speed": 1.0, "stop_seconds": 0.0},
+# ]
 
 #WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
 
@@ -77,42 +137,79 @@ class OffboardControl(Node):
         self.vehicle_odom_subscriber = self.create_subscription(
             VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odom_callback, qos_profile)
         
+
+        self.vehicle_global_subscriber = self.create_subscription(
+            VehicleGlobalPosition, '/fmu/out/vehicle_global_position',
+            self.vehicle_global_callback, qos_profile)
+
         # Initialize variables
         self.offboard_setpoint_counter = 0
         self.vehicle_local_position = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
         self.vehicle_odom = VehicleOdometry()
+        self.vehicle_global = VehicleGlobalPosition()
+
+
         self.takeoff_height = TAKEOFF_HEIGHT
         self.dt = 0.1
         self.is_new_go = 0
         self.is_departed = 0
         self.wait_in_waypoint = 0
         self.previous_yaw = 0.0
-        self.init_x = 0
-        self.init_y = 0
-        self.init_z = 0
         self.now_yaw = 0
         self.is_land = 0
         self.stop_start_time = None
         self.is_stopping = False
+        self.stage_finished = 0
+        self.yaw_hold = 0
+        
+        #PX4 local origin(GPS)
+        self.ref_lat = None
+        self.ref_lon = None
+        self.ref_alt = None
+
+        self.init_x = 0
+        self.init_y = 0
+        self.init_z = 0
+        self.init_yaw = 0.0
+
+        #MAIN GPS -> NED
+        self.main_pts_ned = {}
+
+        self.mission_built = False
+        self.mission_state = "BOOT"
+        self.plan = []
+        self.plan_idx = 0
+        self.is_stopping = False
+        self.stop_start_time = None
+        self.hold_active = False
+        self.hold_x = self.hold_y = self.hold_z = 0.0
+        self.hold_yaw = 0.0
+        self.ref_yaw = 0.0
+
+
+        self.init_ready = False
+        self.init_ready_global = False
+        self.offboard_engaged = False
         
 
         #
-        self.goto_phase = "ALIGN"
-        self.goto_goal = None
-        self.yaw_target = 0.0
-        self.yaw_hold_cnt = 0
-        self.dist_i = 0.0
-        self.prev_v_cmd = 0.0
+        # self.goto_phase = "ALIGN"
+        # self.goto_goal = None
+        # self.yaw_target = 0.0
+        # self.yaw_hold_cnt = 0
+        # self.dist_i = 0.0
+        # self.prev_v_cmd = 0.0
         self.prev_v_vec = np.zeros(3, dtype=float)
-        self.waypoint_range = 0.4
-        self.waypoint_num = len(WAYPOINTS)
-        self.waypoint_count = 0
-        self.takeoff = 0
+        self.waypoint_range = 0.3
+        # self.waypoint_num = len(WAYPOINTS)
+        # self.waypoint_count = 0
+        # self.takeoff = 0
 
         self.yaw_rate_limit = 1 #rad/s
-        self.yaw_tol = math.radians(8) #정렬 허용오차
+        self.yaw_tol = math.radians(15) #정렬 허용오차
         self.yaw_hold_ticks = 5
+        self.yaw_hold_valid = False
         
         self.desired_speed = MOVING_SPEED
         self.kP_dist = 0.8 #(m/s)/m
@@ -128,14 +225,7 @@ class OffboardControl(Node):
 
         
         self.hold_active = False
-        self.hold_x = self.hold_y = self.hold_z = 0.0
-        self.hold_yaw = 0.0
 
-        
-        self.ref_yaw = 0.0
-        self.init_yaw = 0.0
-        self.init_ready = False
-        self.offboard_engaged = False
 
         self._setup_logger()
 
@@ -152,7 +242,7 @@ class OffboardControl(Node):
         cx = float(getattr(self.vehicle_odom, "position", [0,0,0])[0])
         cy = float(getattr(self.vehicle_odom, "position", [0,0,0])[1])
         cz = float(getattr(self.vehicle_odom, "position", [0,0,0])[2])
-        line = (f"{t:.3f} | {tag} | wp={self.waypoint_count}/{len(WAYPOINTS)-1} "
+        line = (f"{t:.3f} | {tag} "
                 f"| pos=({cx:.2f},{cy:.2f},{cz:.2f}) yaw={self.now_yaw:.3f} "
                 f"| hold={int(self.hold_active)} | {extra}\n")
         self._log_fp.write(line)
@@ -176,6 +266,19 @@ class OffboardControl(Node):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
 
+    def vehicle_global_callback(self, msg: VehicleGlobalPosition):
+
+        self.vehicle_global = msg
+        if self.ref_lat is None:
+            self.init_ready_global = True
+            lat = float(msg.lat)
+            lon = float(msg.lon)
+            alt = float(msg.alt)
+            self.ref_lat, self.ref_lon, self.ref_alt = lat, lon, alt
+            self._log("GOT_REF", extra=f"{lat:.7f},{lon:.7f},{alt:.2f}")
+
+            self._build_main_points_ned()
+    
     def arm(self):
         """Send an arm command to the vehicle."""
         self.publish_vehicle_command(
@@ -257,11 +360,24 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
 
+    def _build_main_points_ned(self):
+        if self.ref_lat is None or self.ref_lon is None or self.ref_alt is None:
+            return False
+
+        self.main_pts_ned = {}
+        for name, p in MAIN_POINT_GPS.items():
+            ned = lla_to_ned(p["lat"], p["lon"], p["alt"], self.ref_lat, self.ref_lon, self.ref_alt)
+            self.main_pts_ned[name] = ned
+            self._log("MAIN_NED", extra=f"{name} -> NED=({ned[0]:.2f},{ned[1]:.2f},{ned[2]:.2f})")
+        return True
+
+
+
     def timer_callback(self) -> None:
         """Callback function for the timer."""
         #self.publish_offboard_control_heartbeat_signal(False)
         #print(self.offboard_setpoint_counter)
-        if not self.init_ready:
+        if not self.init_ready :
             self.publish_offboard_control_heartbeat_signal(True)
             cx = float(self.vehicle_odom.position[0])
             cy = float(self.vehicle_odom.position[1])
@@ -280,60 +396,132 @@ class OffboardControl(Node):
             self.offboard_setpoint_counter += 1
 
         
-        if not self.init_ready:
+        if not (self.init_ready and self.init_ready_global):
             return
         
 
-        if (self.takeoff == 0):
+        if (self.mission_state == "BOOT"):
             self.publish_offboard_control_heartbeat_signal(True)
             self.publish_position_setpoint(self.init_x, self.init_y, self.init_z+self.takeoff_height, yaw=self.init_yaw)
             if(self.vehicle_odom.position[2] < self.init_z + self.takeoff_height + 0.3):
                 self.takeoff = 1
+                self.mission_state = "TAKEOFF"
+            return
+        
+        elif (self.mission_state == "TAKEOFF"):
+            self.publish_offboard_control_heartbeat_signal(True)
+            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z+self.takeoff_height, yaw=self.init_yaw)
+            if (self.vehicle_odom.position[2] < self.init_z + self.takeoff_height + 0.3) :
+                self.takeoff = 1
                 self._log("TAKEOFF_DONE")
-            return
+                self.mission_state = "GOTO_1"
         
-        if self.waypoint_count >= len(WAYPOINTS):
-            self._log("MISSION_DONE")
-            self.land()
-            return
+        elif (self.mission_state == "GOTO_1"):
+            # target = (10, 0, TAKEOFF_HEIGHT)
+            # vel = 2
+            # yaw = 0
+            self.goto_waypoint(self.main_pts_ned["low_left"][0], self.main_pts_ned["low_left"][1], TAKEOFF_HEIGHT, 1)
+            if self.is_departed == 1:
+                self.mission_state = "GOTO_2"
+                self.is_departed = 0
 
-        wp = WAYPOINTS[self.waypoint_count]
-        self.goto_waypoint(
-            wp["x"] + self.init_x,
-            wp["y"] + self.init_y,
-            wp["z"] + self.init_z,
-            wp["speed"],
-            wp["yaw"] 
-        )
+        elif (self.mission_state == "GOTO_2"):
+            # target = (10, 0, TAKEOFF_HEIGHT)
+            # vel = 2
+            # yaw = 0
+            self.goto_waypoint(self.main_pts_ned["low_right"][0], self.main_pts_ned["low_right"][1], TAKEOFF_HEIGHT, 2)
+            if self.is_departed == 1:
+                self.mission_state = "GOTO_3"
+                self.is_departed = 0
+
+        elif (self.mission_state == "GOTO_3"):
+            # target = (10, 0, TAKEOFF_HEIGHT)
+            # vel = 2
+            # yaw = 0
+            self.goto_waypoint(self.main_pts_ned["high_right"][0], self.main_pts_ned["high_right"][1], TAKEOFF_HEIGHT, 3)
+            if self.is_departed == 1:
+                self.mission_state = "GOTO_4"
+                self.is_departed = 0
+    
+        elif (self.mission_state == "GOTO_4"):
+            # target = (10, 0, TAKEOFF_HEIGHT)
+            # vel = 2
+            # yaw = 0
+            self.goto_waypoint(self.main_pts_ned["high_left"][0], self.main_pts_ned["high_left"][1], TAKEOFF_HEIGHT, 4)
+            if self.is_departed == 1:
+                self.mission_state = "GOTO_5"
+                self.is_departed = 0
         
-        if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5:
-            self._log("LAND_CMD")
-            self.land()
-            exit(0)
+        elif (self.mission_state == "GOTO_5"):
+            # target = (10, 0, TAKEOFF_HEIGHT)
+            # vel = 2
+            # yaw = 0
+            self.goto_waypoint(self.init_x, self.init_y, TAKEOFF_HEIGHT, 2)
+            if self.is_departed == 1:
+                self.mission_state = "LANDING"
+                self.is_departed = 0
+
+
+
+        elif (self.mission_state == "LANDING"):
+            target = (self.init_x, self.init_y, 0)
+            vel = 0.5
+            self.goto_waypoint(target[0], target[1], target[2], vel)
+            if (self.vehicle_odom.position[2] > -0.5):
+                self._log("LAND_CMD")
+                self.land()
+                exit(0)
+
+
+        # if self.waypoint_count >= len(WAYPOINTS):
+        #     self._log("MISSION_DONE")
+        #     self.land()
+        #     return
+
+        # wp = WAYPOINTS[self.waypoint_count]
+        # if (self.waypoint_count != 0):
+        #     self.goto_waypoint(
+        #         wp["x"] + self.init_x,
+        #         wp["y"] + self.init_y,
+        #         wp["z"] + self.init_z,
+        #         wp["speed"],
+        #         wp["yaw"] 
+        #     )
+        # else:
+        #     self.goto_waypoint(
+        #         wp["x"] + self.init_x,
+        #         wp["y"] + self.init_y,
+        #         wp["z"] + self.init_z,
+        #         wp["speed"],
+        #         wp["yaw"],
+        #         slow_radius = 0
+        #     )
+        
+        # if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5:
+        #     self._log("LAND_CMD")
+        #     self.land()
+        #     exit(0)
         #if self.vehicle_local_position.z > self.takeoff_height and self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
         #self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
 
 
-    def vehicle_odom_callback(self, vehicle_odom):
-        self.vehicle_odom = vehicle_odom
-        self.now_yaw = euler_from_quaternion(
-            self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-            self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-        )
-        if self.offboard_setpoint_counter >= 10 and not self.init_ready:
-            self.init_x = self.vehicle_odom.position[0]
-            self.init_y = self.vehicle_odom.position[1]
-            self.init_z = self.vehicle_odom.position[2]
-        
-            self.ref_yaw = math.atan2(MAIN_WAYPOINT['y'] - self.init_y, 
-                                       MAIN_WAYPOINT['x'] - self.init_x)
-            self.init_yaw = self.now_yaw
-                
-            self._log("INIT",
-                    extra=f"init=({self.init_x:.2f},{self.init_y:.2f},{self.init_z:.2f}) "
-                            f"init_yaw={self.init_yaw:.3f} rad")
-            self.init_ready =True
+    def vehicle_odom_callback(self, msg):
+        self.vehicle_odom = msg
+        self.now_yaw = euler_from_quaternion(msg.q[0], msg.q[1], msg.q[2], msg.q[3])
+        if not self.yaw_hold_valid:
+            self.yaw_hold = float(self.now_yaw)
+            self.yaw_hold_valid = True
 
+        if (self.offboard_setpoint_counter >= 10 and not self.init_ready):
+            self.init_x = float(msg.position[0])
+            self.init_y = float(msg.position[1])
+            self.init_z = float(msg.position[2])
+            self.init_yaw = float(self.now_yaw)
+
+            self.ref_yaw = 0.0
+
+            self._log("INIT_ODOM", extra=f"init=({self.init_x:.2f},{self.init_y:.2f},{self.init_z:.2f}) init_yaw={self.init_yaw:.3f}")
+            self.init_ready = True
 
     def publish_yaw_with_hovering(self, x: float, y: float, z: float, yaw_target: float):
         # position control heartbeat
@@ -409,14 +597,15 @@ class OffboardControl(Node):
 
         self.trajectory_setpoint_publisher.publish(msg)
     
-    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel):
+    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel = 999, slow_radius=-1):
         # 1) align yaw (with control yaw speed)
         # 2) move to target based on distance feedback
 
-        yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
-        
-        self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
-
+        # yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
+        if (slow_radius == -1):
+            self.slow_radius = (20.0/9.0) * v_max #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
+        else:
+            self.slow_radius = slow_radius
         
         cx = float(self.vehicle_odom.position[0])
         cy = float(self.vehicle_odom.position[1])
@@ -425,24 +614,44 @@ class OffboardControl(Node):
         dx = float(to_x - cx)
         dy = float(to_y - cy)
         dz = float(to_z - cz)
+
+        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+        yaw_target = 0
+        if (waypoint_yaw_rel == 999):
+            horiz = math.hypot(dx, dy)
+            if horiz >= self.waypoint_range:
+                yaw_target = wrap_to_pi(math.atan2(dy, dx))
+                self.yaw_hold = yaw_target
+                self.yaw_hold_valid = True
+            else:
+                if getattr(self, "yaw_hold_valid", False):
+                    yaw_target = float(self.yaw_hold)
+                else:
+                    yaw_target = float(self.now_yaw)
+                    self.yaw_hold = yaw_target
+                    self.yaw_hold_valid = True
+        else:
+            yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
+            self.yaw_hold = yaw_target
+            self.yaw_hold_valid = True
         
         dist = math.sqrt(dx*dx + dy*dy + dz*dz)
         self.distance_target = dist
         yaw_err = abs(angle_diff(yaw_target, self.now_yaw))
-        if dist < self.waypoint_range and yaw_err > self.yaw_tol:
+        if dist < 1.5 * self.waypoint_range and yaw_err > self.yaw_tol:
             self.publish_yaw_with_hovering(to_x, to_y, to_z, yaw_target)
             self._log("ALIGN_YAW", extra=f"yaw_err={yaw_err:.3f} tol={self.yaw_tol:.3f}")
             return
         
 
-        stop_sec = WAYPOINTS[self.waypoint_count]['stop_seconds']
+        stop_sec = 0.1
         if (dist < self.waypoint_range and yaw_err <= self.yaw_tol):
 
             if not self.is_stopping:
                 self.is_stopping = True
                 self.stop_start_time = self.get_clock().now()
                 self.get_logger().info(
-                    f"Waypoint {self.waypoint_count}: stopping for {stop_sec} sec"
+                    f"Waypoint {dx}, {dy}, {dz} : stopping for {stop_sec} sec"
                 )
                 self.hold_active = True
                 self.hold_x = to_x
@@ -462,8 +671,8 @@ class OffboardControl(Node):
                 self.is_stopping = False
                 self.stop_start_time = None
                 self.hold_active = False
-
-                self.waypoint_count += 1
+                self.is_departed = 1
+                #self.waypoint_count += 1
                 self.prev_v_vec[:] = 0.0
             return
         
@@ -481,9 +690,27 @@ class OffboardControl(Node):
         self.publish_offboard_control_heartbeat_signal(False)
         self.publish_velocity_setpoint(to_x, to_y, to_z, v_cmd, yaw_target)
 
-        self._log("GOTO",
-                extra=f"to=({to_x:.2f},{to_y:.2f},{to_z:.2f}) dist={dist:.2f} v={v_cmd:.2f} yaw_t={yaw_target:.3f}")
-        
+        # self._log("GOTO",
+        #         extra=f"to=({to_x:.2f},{to_y:.2f},{to_z:.2f}) dist={dist:.2f} v={v_cmd:.2f} yaw_t={yaw_target:.3f}")
+
+        cur_lat = float(getattr(self.vehicle_global, "lat", float("nan")))
+        cur_lon = float(getattr(self.vehicle_global, "lon", float("nan")))
+        cur_alt = float(getattr(self.vehicle_global, "alt", float("nan")))
+
+        cx = float(self.vehicle_odom.position[0])
+        cy = float(self.vehicle_odom.position[1])
+        cz = float(self.vehicle_odom.position[2])
+
+        self._log(
+            "GOTO",
+            extra=(
+                f"curNED=({cx:.2f},{cy:.2f},{cz:.2f}) "
+                f"toNED=({float(to_x):.2f},{float(to_y):.2f},{float(to_z):.2f}) "
+                f"dist={dist:.2f} v={v_cmd:.2f} yaw_t={yaw_target:.3f} | "
+                f"curGPS=({cur_lat:.7f},{cur_lon:.7f},{cur_alt:.2f}) "
+                f"refGPS=({float(self.ref_lat):.7f},{float(self.ref_lon):.7f},{float(self.ref_alt):.2f})"
+            )
+        )
     def hover_here(self):
         #print("hovering 중")
 

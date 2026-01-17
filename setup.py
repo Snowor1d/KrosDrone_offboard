@@ -1,11 +1,11 @@
-from setuptools import setup
+from setuptools import find_packages, setup
 
 package_name = 'offboard'
 
 setup(
     name=package_name,
     version='0.0.0',
-    packages=[package_name],
+    packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -13,19 +13,22 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='hoon',
-    maintainer_email='tg42008@gmail.com',
+    maintainer='snowor1d',
+    maintainer_email='437travel@naver.com',
     description='TODO: Package description',
     license='TODO: License declaration',
-    tests_require=['pytest'],
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
     entry_points={
         'console_scripts': [
-            'offboard_control_py = offboard.offboard_control:main',
-            'hovering = offboard.Hovering:main',
-            'waypoint1 = offboard.Waypoint1:main',
-            'waypoint2 = offboard.Waypoint2:main',
-            'waypoint3 = offboard.Waypoint3:main',
-            'waypoint4 = offboard.Waypoint4:main'
+        	'offboard1 = offboard.offboard_control:main',
+        	'waypoint = offboard.offboard_waypoint:main',
+        	'waypoint1 = offboard.offboard_waypoint1:main',
+        	'delivery = offboard.offboard_delivery:main',
+        	'lidar = offboard.offboard_control_lidar_based:main'
         ],
     },
 )
