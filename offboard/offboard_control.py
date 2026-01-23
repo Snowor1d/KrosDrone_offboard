@@ -3,60 +3,70 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus, VehicleOdometry
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus
 import math
 import numpy as np
-import os, time
-from datetime import datetime
+from sensor_msgs.msg import NavSatFix
 
-FLOATING_SPEED = 0.5
-MOVING_SPEED = 1.5
-NAN = float('nan')
-TAKEOFF_HEIGHT = -2
 
-def wrap_to_pi(a: float) -> float:
-    """wrap angle to [-pi, pi]."""
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
+# =========================
+# GPS Mapping (Method B)
+# =========================
 
-def angle_diff(target: float, current: float) -> float:
-    """target - current in [-pi, pi]."""
-    return wrap_to_pi(target - current)
+GPS_LATLON = np.array([
+    [37.6558868, 128.6757588],  # Point1 (P1)
+    [37.6557475, 128.6758443],  # Point2
+    [37.6557181, 128.6757395],  # Point3
+    [37.6558802, 128.6756559],  # Point4
+], dtype=float)
 
-def euler_from_quaternion(w, x, y, z): 
-    t0 = +2 * (w*x+y*z)
-    t1 = +1 - 2*(x*x+y*y)
-    t3 = +2*(w*z+x*y)
-    t4 = +1-2*(y*y+z*z)
-    yaw_z = math.atan2(t3, t4)
-    return yaw_z
+# Candidate zone vertices in Gazebo WORLD ENU (x=E, y=N)
+SIM_EN_WORLD = np.array([
+    [-5.0, 26.3226159],   # A_world (Point1)  <-- P1 target
+    [18.5, 26.3226159],   # B_world (Point2)
+    [23.0, 40.9948284],   # C_world (Point3)
+    [-5.0, 40.9948284],   # D_world (Point4)
+], dtype=float)
 
-MAIN_WAYPOINT = {"x" : 1, "y" : 0, "z" : 0}
 
-#NED 기준. yaw방향은 시작위치 -> MAIN_WAYPOINT 방향이 0.0.
-WAYPOINTS = [
-    {"x": 0,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": 0.0,              "speed": 1.0, "stop_seconds": 0.1},
-    {"x": 2,  "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(0),  "speed": 0.3, "stop_seconds": 0.1},
-    {"x": 3,  "y": 3,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(45), "speed": 0.8, "stop_seconds": 10},
-    {"x": 0,  "y": 5,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(90), "speed": 1.5, "stop_seconds": 0.1},
-    {"x": -5, "y": 0,  "z": TAKEOFF_HEIGHT, "yaw": math.radians(180),"speed": 2.0, "stop_seconds": 0.1},
-    {"x": -5, "y": 0,  "z": 0,              "yaw": math.radians(180),"speed": 1.0, "stop_seconds": 0.0},
-]
+def latlon_to_EN(lat: float, lon: float, lat0: float, lon0: float):
+    R = 111111.0
+    east = (lon - lon0) * R * math.cos(math.radians(lat0))
+    north = (lat - lat0) * R
+    return east, north
 
-#WAYPOINTS = [[0, 0, -2, 1, ], [5, 0, -2, 1], [5, 5, -2, 1], [0, 5, -2, 1], [0, 0, -2, 1], [0, 0, -0.1, 1]] #[x, y, z, yaw_mode, deisred_speed]
 
+def EN_to_latlon(east: float, north: float, lat0: float, lon0: float):
+    R = 111111.0
+    lat = lat0 + (north / R)
+    lon = lon0 + (east / (R * math.cos(math.radians(lat0))))
+    return lat, lon
+
+
+def fit_affine_EN_to_EN(sim_EN: np.ndarray, gps_latlon: np.ndarray):
+    lat0 = float(gps_latlon[0, 0])
+    lon0 = float(gps_latlon[0, 1])
+    gps_EN = np.array([latlon_to_EN(lat, lon, lat0, lon0) for lat, lon in gps_latlon], dtype=float)
+
+    X = np.hstack([sim_EN, np.ones((sim_EN.shape[0], 1))])
+    M, *_ = np.linalg.lstsq(X, gps_EN, rcond=None)
+    return M, lat0, lon0
+
+
+def sim_local_NE_to_latlon(north_m: float, east_m: float, M, lat0: float, lon0: float):
+    simE = float(east_m)
+    simN = float(north_m)
+    gps_EN_pred = np.array([simE, simN, 1.0]) @ M
+    return EN_to_latlon(float(gps_EN_pred[0]), float(gps_EN_pred[1]), lat0, lon0)
 
 
 class OffboardControl(Node):
     """Node for controlling a vehicle in offboard mode."""
 
     def __init__(self) -> None:
-        super().__init__('offboard_control_takeoff_and_land')
+        super().__init__('offboard_control_go_to_p1_hover')
         print("### AMRL's KROS Drone ###")
-        # Configure QoS profile for publishing and subscribing
+
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -64,7 +74,7 @@ class OffboardControl(Node):
             depth=1
         )
 
-        # Create publishers
+        # Publishers
         self.offboard_control_mode_publisher = self.create_publisher(
             OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
         self.trajectory_setpoint_publisher = self.create_publisher(
@@ -72,177 +82,85 @@ class OffboardControl(Node):
         self.vehicle_command_publisher = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        # Create subscribers
+        # [GPS publish]
+        self.sim_navsat_pub = self.create_publisher(
+            NavSatFix, '/sim/navsat_fix', qos_profile)
+
+        # Subscribers (v1 topics)
         self.vehicle_local_position_subscriber = self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
+            self.vehicle_local_position_callback, qos_profile)
         self.vehicle_status_subscriber = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
-        self.vehicle_odom_subscriber = self.create_subscription(
-            VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odom_callback, qos_profile)
-        
-        # Initialize variables
+            VehicleStatus, '/fmu/out/vehicle_status_v1',
+            self.vehicle_status_callback, qos_profile)
+
+        # State
         self.offboard_setpoint_counter = 0
         self.vehicle_local_position = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
-        self.vehicle_odom = VehicleOdometry()
-        self.takeoff_height = TAKEOFF_HEIGHT
-        self.dt = 0.1
-        self.is_new_go = 0
-        self.is_departed = 0
-        self.wait_in_waypoint = 0
-        self.previous_yaw = 0.0
-        self.init_x = 0
-        self.init_y = 0
-        self.init_z = 0
-        self.now_yaw = 0
-        self.is_land = 0
-        self.stop_start_time = None
-        self.is_stopping = False
-        
 
-        #
-        self.goto_phase = "ALIGN"
-        self.goto_goal = None
-        self.yaw_target = 0.0
-        self.yaw_hold_cnt = 0
-        self.dist_i = 0.0
-        self.prev_v_cmd = 0.0
-        self.prev_v_vec = np.zeros(3, dtype=float)
-        self.waypoint_range = 0.4
-        self.waypoint_num = len(WAYPOINTS)
-        self.waypoint_count = 0
-        self.takeoff = 0
+        # Flight params
+        self.takeoff_height = -10.0  # NED: negative up
+        self.wp_reached_xy = 0.8    # meters
 
-        self.yaw_rate_limit = 1 #rad/s
-        self.yaw_tol = math.radians(8) #정렬 허용오차
-        self.yaw_hold_ticks = 5
-        
-        self.desired_speed = MOVING_SPEED
-        self.kP_dist = 0.8 #(m/s)/m
-        self.kI_dist = 0.05 #(m/s)/(m*s)
-        self.dist_i_limit = 2.0
-        self.v_min = 0 # m/s
-        self.slow_radius = 4 #이 안에서 부드럽게 감속
-        self.v_slew = 1.5 #속도 코긔 변화 제한
-        self.vec_slow = 2.0 #vx, vy, vz 변화 제한
+        # Target: P1 (GPS Point1) mapped to SIM world vertex A
+        # SIM_EN_WORLD uses (E, N). PX4 local uses (N, E).
+        p1_e = float(SIM_EN_WORLD[0, 0])  # -5.0
+        p1_n = float(SIM_EN_WORLD[0, 1])  # 26.3226159
+        self.target_n = p1_n
+        self.target_e = p1_e
 
-        # Create a timer to publish control commands
+        # GPS mapping (affine fit)
+        self.affine_M, self.lat0, self.lon0 = fit_affine_EN_to_EN(SIM_EN_WORLD, GPS_LATLON)
+        self.get_logger().info(f"\n[GPS Mapping] Affine M:\n{self.affine_M}\nlat0={self.lat0}, lon0={self.lon0}")
+
+        # Timer
         self.timer = self.create_timer(0.1, self.timer_callback)
 
-        
-        self.hold_active = False
-        self.hold_x = self.hold_y = self.hold_z = 0.0
-        self.hold_yaw = 0.0
-
-        
-        self.ref_yaw = 0.0
-        self.init_yaw = 0.0
-        self.init_ready = False
-        self.offboard_engaged = False
-
-        self._setup_logger()
-
-    def _setup_logger(self):
-        home = os.path.expanduser("~")
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = os.path.join(home, f"kros_offboard_{ts}.txt")
-        self._log_fp = open(self.log_path, "w", buffering=1)
-        self._log("START", extra=f"log_path={self.log_path}")
-
-    def _log(self, tag: str, extra: str = ""):
-        # ROS time 대신 wall time이 더 직관적이면 time.time() 사용
-        t = time.time()
-        cx = float(getattr(self.vehicle_odom, "position", [0,0,0])[0])
-        cy = float(getattr(self.vehicle_odom, "position", [0,0,0])[1])
-        cz = float(getattr(self.vehicle_odom, "position", [0,0,0])[2])
-        line = (f"{t:.3f} | {tag} | wp={self.waypoint_count}/{len(WAYPOINTS)-1} "
-                f"| pos=({cx:.2f},{cy:.2f},{cz:.2f}) yaw={self.now_yaw:.3f} "
-                f"| hold={int(self.hold_active)} | {extra}\n")
-        self._log_fp.write(line)
-
-    def _as_pos3(self, x, y, z, tag="pos"):
-        px, py, pz = float(x), float(y), float(z)
-
-        # NaN/inf 방지
-        if not (math.isfinite(px) and math.isfinite(py) and math.isfinite(pz)):
-            self.get_logger().error(f"[{tag}] Non-finite position: {(px,py,pz)} "
-                                    f"raw={(x,y,z)} types={(type(x),type(y),type(z))}")
-            return None
-
-        return [px, py, pz]
-
     def vehicle_local_position_callback(self, vehicle_local_position):
-        """Callback function for vehicle_local_position topic subscriber."""
         self.vehicle_local_position = vehicle_local_position
 
     def vehicle_status_callback(self, vehicle_status):
-        """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
 
     def arm(self):
-        """Send an arm command to the vehicle."""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
         self.get_logger().info('Arm command sent')
 
     def disarm(self):
-        """Send a disarm command to the vehicle."""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
         self.get_logger().info('Disarm command sent')
 
     def engage_offboard_mode(self):
-        """Switch to offboard mode."""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
         self.get_logger().info("Switching to offboard mode")
 
     def land(self):
-        """Switch to land mode."""
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
         self.get_logger().info("Switching to land mode")
 
-    def publish_offboard_control_heartbeat_signal(self, is_p):
-        """Publish the offboard control mode."""
+    def publish_offboard_control_heartbeat_signal(self):
         msg = OffboardControlMode()
-
-        if is_p: # position control
-            msg.velocity = False
-            msg.position = True
-        
-        else: 
-            msg.velocity = True
-            msg.position = False
-
+        msg.position = True
+        msg.velocity = False
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_control_mode_publisher.publish(msg)
 
-    def publish_position_setpoint(self, x: float, y: float, z: float, yaw: float = None):
+    def publish_position_setpoint(self, x: float, y: float, z: float):
         msg = TrajectorySetpoint()
+        msg.position = [x, y, z]
+        msg.yaw = 1.57079
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-
-        pos = self._as_pos3(x, y, z, tag="publish_position_setpoint")
-        if pos is None:
-            return
-        msg.position = pos
-
-        # position control에서 나머지는 NAN로
-        msg.velocity = [NAN, NAN, NAN]
-        msg.acceleration = [NAN, NAN, NAN]
-        msg.jerk = [NAN, NAN, NAN]
-
-        if yaw is None:
-            yaw = float(self.now_yaw)
-        msg.yaw = float(yaw)
-        msg.yawspeed = 0.0
-
         self.trajectory_setpoint_publisher.publish(msg)
+        self.get_logger().info(f"Publishing position setpoints {[x, y, z]}")
 
     def publish_vehicle_command(self, command, **params) -> None:
-        """Publish a vehicle command."""
         msg = VehicleCommand()
         msg.command = command
         msg.param1 = params.get("param1", 0.0)
@@ -260,265 +178,68 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
 
-    def timer_callback(self) -> None:
-        """Callback function for the timer."""
-        #self.publish_offboard_control_heartbeat_signal(False)
-        #print(self.offboard_setpoint_counter)
-        if not self.init_ready:
-            self.publish_offboard_control_heartbeat_signal(True)
-            cx = float(self.vehicle_odom.position[0])
-            cy = float(self.vehicle_odom.position[1])
-            cz = float(self.vehicle_odom.position[2])
-            self.publish_position_setpoint(cx, cy, cz, yaw=self.now_yaw)
-        elif self.init_ready and self.offboard_setpoint_counter < 10:
-            self.publish_offboard_control_heartbeat_signal(True)
-            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z, self.init_yaw)
+    def publish_sim_navsat_fix(self):
+        n = float(self.vehicle_local_position.x)  # North
+        e = float(self.vehicle_local_position.y)  # East
+        lat, lon = sim_local_NE_to_latlon(n, e, self.affine_M, self.lat0, self.lon0)
 
-        if self.offboard_setpoint_counter == 10 and not self.offboard_engaged:
+        msg = NavSatFix()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "map"
+        msg.latitude = lat
+        msg.longitude = lon
+        msg.altitude = 0.0
+        self.sim_navsat_pub.publish(msg)
+
+    def _xy_reached(self, target_n: float, target_e: float) -> bool:
+        n = float(self.vehicle_local_position.x)
+        e = float(self.vehicle_local_position.y)
+        dist = math.sqrt((target_n - n) ** 2 + (target_e - e) ** 2)
+        return dist <= self.wp_reached_xy
+
+    def timer_callback(self) -> None:
+        self.publish_offboard_control_heartbeat_signal()
+
+        # Engage offboard + arm after some setpoints
+        if self.offboard_setpoint_counter == 10:
             self.engage_offboard_mode()
             self.arm()
-            self.offboard_engaged = True
-            self._log("OFFBOARD_ARM")
+
+        # Publish mapped GPS if local_position is valid
+        if getattr(self.vehicle_local_position, "timestamp", 0) != 0:
+            self.publish_sim_navsat_fix()
+
+        # -----------------------------
+        # State machine:
+        # 1) takeoff/hover to -5m at origin
+        # 2) go to P1 (Point1) and hover
+        # -----------------------------
+        if self.vehicle_status.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+            # keep sending takeoff setpoint until offboard is active
+            self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
+        else:
+            # If not yet reached takeoff altitude, keep hovering at origin
+            if float(self.vehicle_local_position.z) > self.takeoff_height + 0.3:
+                self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
+            else:
+                # Go to P1 and hover there
+                self.publish_position_setpoint(self.target_n, self.target_e, self.takeoff_height)
+
+                # Optional: log when reached (still keeps publishing same setpoint = hover)
+                if self._xy_reached(self.target_n, self.target_e):
+                    self.get_logger().info("Reached P1. Hovering...")
+
         if self.offboard_setpoint_counter < 11:
             self.offboard_setpoint_counter += 1
-
-        
-        if not self.init_ready:
-            return
-        
-
-        if (self.takeoff == 0):
-            self.publish_offboard_control_heartbeat_signal(True)
-            self.publish_position_setpoint(self.init_x, self.init_y, self.init_z+self.takeoff_height, yaw=self.init_yaw)
-            if(self.vehicle_odom.position[2] < self.init_z + self.takeoff_height + 0.3):
-                self.takeoff = 1
-                self._log("TAKEOFF_DONE")
-            return
-        
-        if self.waypoint_count >= len(WAYPOINTS):
-            self._log("MISSION_DONE")
-            self.land()
-            return
-
-        wp = WAYPOINTS[self.waypoint_count]
-        if (self.waypoint_count != 0):
-            self.goto_waypoint(
-                wp["x"] + self.init_x,
-                wp["y"] + self.init_y,
-                wp["z"] + self.init_z,
-                wp["speed"],
-                wp["yaw"] 
-            )
-        else:
-            self.goto_waypoint(
-                wp["x"] + self.init_x,
-                wp["y"] + self.init_y,
-                wp["z"] + self.init_z,
-                wp["speed"],
-                wp["yaw"],
-                slow_radius = 0
-            )
-        
-        if self.waypoint_count == len(WAYPOINTS)-1 and self.vehicle_odom.position[2] > -0.5:
-            self._log("LAND_CMD")
-            self.land()
-            exit(0)
-        #if self.vehicle_local_position.z > self.takeoff_height and self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-        #self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
-
-
-    def vehicle_odom_callback(self, vehicle_odom):
-        self.vehicle_odom = vehicle_odom
-        self.now_yaw = euler_from_quaternion(
-            self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-            self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-        )
-        if self.offboard_setpoint_counter >= 10 and not self.init_ready:
-            self.init_x = self.vehicle_odom.position[0]
-            self.init_y = self.vehicle_odom.position[1]
-            self.init_z = self.vehicle_odom.position[2]
-        
-            self.ref_yaw = math.atan2(MAIN_WAYPOINT['y'] - self.init_y, 
-                                       MAIN_WAYPOINT['x'] - self.init_x)
-            self.init_yaw = self.now_yaw
-                
-            self._log("INIT",
-                    extra=f"init=({self.init_x:.2f},{self.init_y:.2f},{self.init_z:.2f}) "
-                            f"init_yaw={self.init_yaw:.3f} rad")
-            self.init_ready =True
-
-
-    def publish_yaw_with_hovering(self, x: float, y: float, z: float, yaw_target: float):
-        # position control heartbeat
-        self.publish_offboard_control_heartbeat_signal(True)
-
-        # 현재 yaw
-        # cur_yaw = euler_from_quaternion(
-        #     self.vehicle_odom.q[0], self.vehicle_odom.q[1],
-        #     self.vehicle_odom.q[2], self.vehicle_odom.q[3]
-        # )
-
-        # # 목표 yaw까지 천천히
-        # err = angle_diff(yaw_target, cur_yaw)
-        # max_step = float(self.yaw_rate_limit) * float(self.dt)
-        # step = max(-max_step, min(max_step, err))
-        # yaw_cmd = float(wrap_to_pi(cur_yaw + step))
-        #self.previous_yaw = yaw_cmd
-
-        msg = TrajectorySetpoint()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-
-        msg.position = [float(x), float(y), float(z)]
-        msg.velocity = [NAN, NAN, NAN]
-        msg.acceleration = [NAN, NAN, NAN]
-        msg.jerk = [NAN, NAN, NAN]
-
-        msg.yaw = yaw_target
-        msg.yawspeed = NAN  # yaw로 직접 제어
-
-        self.trajectory_setpoint_publisher.publish(msg)
-
-    def publish_velocity_setpoint(self, t_x: float, t_y: float, t_z: float,
-                                v: float, yaw_target: float):
-        cx = float(self.vehicle_odom.position[0])
-        cy = float(self.vehicle_odom.position[1])
-        cz = float(self.vehicle_odom.position[2])
-
-        dx = float(t_x - cx)
-        dy = float(t_y - cy)
-        dz = float(t_z - cz)
-
-        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-        #print(dist)
-
-        #desired yaw
-
-        if dist < 1e-6 or v <= 0.0:
-            v_vec = np.zeros(3, dtype=float)
-        else:
-            dir_vec = np.array([dx, dy, dz], dtype=float) / dist
-            v_vec = dir_vec * float(v)
-
-
-        # slew limit on velocity vector change
-        dv_max = float(self.v_slew) * float(self.dt)  # m/s per tick
-        dv = v_vec - self.prev_v_vec
-        dv_norm = float(np.linalg.norm(dv))
-        if dv_norm > dv_max and dv_norm > 1e-9:
-            v_vec = self.prev_v_vec + dv * (dv_max / dv_norm)
-        self.prev_v_vec = v_vec
-
-        # publish (velocity control)
-        msg = TrajectorySetpoint()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-
-        msg.position = [NAN, NAN, NAN] 
-        msg.velocity = [float(v_vec[0]), float(v_vec[1]), float(v_vec[2])]
-        msg.acceleration = [NAN, NAN, NAN]
-        msg.jerk = [NAN, NAN, NAN]
-
-        msg.yaw = float(yaw_target)
-        msg.yawspeed = NAN
-
-        self.trajectory_setpoint_publisher.publish(msg)
-    
-    def goto_waypoint(self, to_x, to_y, to_z, v_max, waypoint_yaw_rel, slow_radius=-1):
-        # 1) align yaw (with control yaw speed)
-        # 2) move to target based on distance feedback
-
-        yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
-        if (slow_radius == -1):
-            self.slow_radius = (20.0/9.0) * v_max + (5.0/9.0) #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
-        else:
-            self.slow_radius = slow_radius
-        
-        cx = float(self.vehicle_odom.position[0])
-        cy = float(self.vehicle_odom.position[1])
-        cz = float(self.vehicle_odom.position[2])
-
-        dx = float(to_x - cx)
-        dy = float(to_y - cy)
-        dz = float(to_z - cz)
-        
-        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-        self.distance_target = dist
-        yaw_err = abs(angle_diff(yaw_target, self.now_yaw))
-        if dist < self.waypoint_range and yaw_err > self.yaw_tol:
-            self.publish_yaw_with_hovering(to_x, to_y, to_z, yaw_target)
-            self._log("ALIGN_YAW", extra=f"yaw_err={yaw_err:.3f} tol={self.yaw_tol:.3f}")
-            return
-        
-
-        stop_sec = WAYPOINTS[self.waypoint_count]['stop_seconds']
-        if (dist < self.waypoint_range and yaw_err <= self.yaw_tol):
-
-            if not self.is_stopping:
-                self.is_stopping = True
-                self.stop_start_time = self.get_clock().now()
-                self.get_logger().info(
-                    f"Waypoint {self.waypoint_count}: stopping for {stop_sec} sec"
-                )
-                self.hold_active = True
-                self.hold_x = to_x
-                self.hold_y = to_y
-                self.hold_z = to_z
-                self.hold_yaw = yaw_target 
-                self._log("WP_ARRIVE",
-                      extra=f"hold=({self.hold_x:.2f},{self.hold_y:.2f},{self.hold_z:.2f}) "
-                            f"hold_yaw={self.hold_yaw:.3f} stop={stop_sec}")
-
-            self.hover_here()
-
-            elapsed = (self.get_clock().now() - self.stop_start_time).nanoseconds * 1e-9
-            if elapsed >= stop_sec:
-                #print("들어옴")
-                self._log("WP_DEPART", extra=f"elapsed={elapsed:.2f}")
-                self.is_stopping = False
-                self.stop_start_time = None
-                self.hold_active = False
-
-                self.waypoint_count += 1
-                self.prev_v_vec[:] = 0.0
-            return
-        
-        self.is_stopping = False
-        self.stop_start_time = None
-        self.hold_active = False
-
-        v_cmd = float(v_max)
-        if dist < float(self.slow_radius):
-            v_cmd *= (dist / float(self.slow_radius))
-        v_cmd = max(0.0, min(float(v_max), v_cmd))
-        if dist > self.waypoint_range:
-            v_cmd = max(float(self.v_min), v_cmd)
-
-        self.publish_offboard_control_heartbeat_signal(False)
-        self.publish_velocity_setpoint(to_x, to_y, to_z, v_cmd, yaw_target)
-
-        self._log("GOTO",
-                extra=f"to=({to_x:.2f},{to_y:.2f},{to_z:.2f}) dist={dist:.2f} v={v_cmd:.2f} yaw_t={yaw_target:.3f}")
-        
-    def hover_here(self):
-        #print("hovering 중")
-
-        self.publish_offboard_control_heartbeat_signal(True)
-        self.publish_position_setpoint(self.hold_x, self.hold_y, self.hold_z, yaw=self.hold_yaw)
 
 
 def main(args=None) -> None:
     print('Starting offboard control node...')
     rclpy.init(args=args)
     offboard_control = OffboardControl()
-    try:
-        rclpy.spin(offboard_control)
-    finally:
-        try:
-            offboard_control._log("SHUTDOWN")
-            offboard_control._log_fp.close()
-        except Exception:
-            pass
-        offboard_control.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(offboard_control)
+    offboard_control.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':
@@ -526,3 +247,191 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         print(e)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# #!/usr/bin/env python3
+
+# import rclpy
+# from rclpy.node import Node
+# from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+# from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus
+# import math
+# import numpy as np
+# from sensor_msgs.msg import NavSatFix
+
+
+# class OffboardControl(Node):
+#     """Node for controlling a vehicle in offboard mode."""
+
+#     def __init__(self) -> None:
+#         super().__init__('offboard_control_takeoff_and_land')
+#         print("### AMRL's KROS Drone ###")
+#         # Configure QoS profile for publishing and subscribing
+#         qos_profile = QoSProfile(
+#             reliability=ReliabilityPolicy.BEST_EFFORT,
+#             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+#             history=HistoryPolicy.KEEP_LAST,
+#             depth=1
+#         )
+
+#         # Create publishers
+#         self.offboard_control_mode_publisher = self.create_publisher(
+#             OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
+#         self.trajectory_setpoint_publisher = self.create_publisher(
+#             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
+#         self.vehicle_command_publisher = self.create_publisher(
+#             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
+
+#         # Create subscribers
+#         self.vehicle_local_position_subscriber = self.create_subscription(
+#             VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
+#         self.vehicle_status_subscriber = self.create_subscription(
+#             VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
+
+#         # Initialize variables
+#         self.offboard_setpoint_counter = 0
+#         self.vehicle_local_position = VehicleLocalPosition()
+#         self.vehicle_status = VehicleStatus()
+#         self.takeoff_height = -5.0
+
+#         # Create a timer to publish control commands
+#         self.timer = self.create_timer(0.1, self.timer_callback)
+
+#     def vehicle_local_position_callback(self, vehicle_local_position):
+#         """Callback function for vehicle_local_position topic subscriber."""
+#         self.vehicle_local_position = vehicle_local_position
+
+#     def vehicle_status_callback(self, vehicle_status):
+#         """Callback function for vehicle_status topic subscriber."""
+#         self.vehicle_status = vehicle_status
+
+#     def arm(self):
+#         """Send an arm command to the vehicle."""
+#         self.publish_vehicle_command(
+#             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+#         self.get_logger().info('Arm command sent')
+
+#     def disarm(self):
+#         """Send a disarm command to the vehicle."""
+#         self.publish_vehicle_command(
+#             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
+#         self.get_logger().info('Disarm command sent')
+
+#     def engage_offboard_mode(self):
+#         """Switch to offboard mode."""
+#         self.publish_vehicle_command(
+#             VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
+#         self.get_logger().info("Switching to offboard mode")
+
+#     def land(self):
+#         """Switch to land mode."""
+#         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+#         self.get_logger().info("Switching to land mode")
+
+#     def publish_offboard_control_heartbeat_signal(self):
+#         """Publish the offboard control mode."""
+#         msg = OffboardControlMode()
+#         msg.position = True
+#         msg.velocity = False
+#         msg.acceleration = False
+#         msg.attitude = False
+#         msg.body_rate = False
+#         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+#         self.offboard_control_mode_publisher.publish(msg)
+
+#     def publish_position_setpoint(self, x: float, y: float, z: float):
+#         """Publish the trajectory setpoint."""
+#         msg = TrajectorySetpoint()
+#         msg.position = [x, y, z]
+#         msg.yaw = 1.57079  # (90 degree)
+#         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+#         #self.get_logger().info(f"Publishing position setpoints {[x, y, z]}")
+#         self.trajectory_setpoint_publisher.publish(msg)
+#         self.get_logger().info(f"Publishing position setpoints {[x, y, z]}")
+
+#     def publish_vehicle_command(self, command, **params) -> None:
+#         """Publish a vehicle command."""
+#         msg = VehicleCommand()
+#         msg.command = command
+#         msg.param1 = params.get("param1", 0.0)
+#         msg.param2 = params.get("param2", 0.0)
+#         msg.param3 = params.get("param3", 0.0)
+#         msg.param4 = params.get("param4", 0.0)
+#         msg.param5 = params.get("param5", 0.0)
+#         msg.param6 = params.get("param6", 0.0)
+#         msg.param7 = params.get("param7", 0.0)
+#         msg.target_system = 1
+#         msg.target_component = 1
+#         msg.source_system = 1
+#         msg.source_component = 1
+#         msg.from_external = True
+#         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+#         self.vehicle_command_publisher.publish(msg)
+
+#     def timer_callback(self) -> None:
+#         """Callback function for the timer."""
+#         self.publish_offboard_control_heartbeat_signal()
+
+#         if self.offboard_setpoint_counter == 10:
+#             self.engage_offboard_mode()
+#             self.arm()
+        
+#         #if self.vehicle_local_position.z > self.takeoff_height and self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+#         self.publish_position_setpoint(0.0, 0.0, self.takeoff_height)
+
+#         if self.vehicle_local_position.z <= self.takeoff_height:
+#             self.land()
+#             exit(0)
+
+#         if self.offboard_setpoint_counter < 11:
+#             self.offboard_setpoint_counter += 1
+
+
+# def main(args=None) -> None:
+#     print('Starting offboard control node...')
+#     rclpy.init(args=args)
+#     offboard_control = OffboardControl()
+#     rclpy.spin(offboard_control)
+#     offboard_control.destroy_node()
+#     rclpy.shutdown()
+
+
+# if __name__ == '__main__':
+#     try:
+#         main()
+#     except Exception as e:
+#         print(e)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
