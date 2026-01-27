@@ -29,7 +29,8 @@ setup(
         	'waypoint1 = offboard.offboard_waypoint1:main',
         	'delivery = offboard.offboard_delivery:main',
         	'lidar = offboard.offboard_control_lidar_based:main',
-        	'hovering = offboard.offboard_hovering:main'
+        	'hovering = offboard.offboard_hovering:main',
+        	'real = offboard.offboard_control_real:main'
         ],
     },
 )
