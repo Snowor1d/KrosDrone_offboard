@@ -30,7 +30,10 @@ setup(
         	'delivery = offboard.offboard_delivery:main',
         	'lidar = offboard.offboard_control_lidar_based:main',
         	'hovering = offboard.offboard_hovering:main',
-        	'real = offboard.offboard_control_real:main'
+        	'real = offboard.offboard_control_real:main',
+        	'real2 = offboard.offboard_control_real2:main',
+        	'sim2 = offboard.offboard_control_sim2:main',
+        	'sim3 = offboard.offboard_control_sim3:main'
         ],
     },
 )
