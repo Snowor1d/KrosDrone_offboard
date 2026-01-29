@@ -146,6 +146,10 @@ class OffboardControl(Node):
         self.vehicle_command_publisher = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
+        self.gimbal_publisher = self.create_publisher(
+            Bool, '/camera/gimbal_cmd', 10
+        )
+
         # Create subscribers
         self.vehicle_local_position_subscriber = self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
@@ -179,7 +183,7 @@ class OffboardControl(Node):
         )
         
         self.lidar_height_sub = self.create_subscription(
-            LaserScan, 'lidar_height', self.lidar_height_callback, 10
+            Float32, 'lidar_height', self.lidar_height_callback, 10
         )
 
         self.delivery_open = False
@@ -289,7 +293,7 @@ class OffboardControl(Node):
     def gimbal_callback(self, msg:Bool):
         last_gimbal = self.gimbal
         self.gimbal = msg.data
-        print(self.gimbal)
+        #print(self.gimbal)
         if (last_gimbal == 0 and self.gimbal == 1):
             self._log("gimbal changed")
             print("gimbal changed !")
@@ -316,6 +320,10 @@ class OffboardControl(Node):
             f"Updated Target -> X: {self.target_x:.4f}, Y: {self.target_y:.4f}, Z: {self.target_z:.4f}"
         )
 
+    def publish_gimbal_cmd(self, cmd:bool):
+        msg = Bool()
+        msg.data = bool(cmd)
+        self.gimbal_publisher.publish(msg)
 
     def publish_delivery_open_flag(self, flag:bool):
         msg = Bool()
@@ -526,7 +534,7 @@ class OffboardControl(Node):
     def timer_callback(self) -> None:
         """Callback function for the timer."""
         #self.publish_offboard_control_heartbeat_signal(False)
-        #print(self.offboard_setpoint_counter)
+
         now = self.get_clock().now()
 
             # --- Lidar failsafe: 2초 이상 수신 없으면 강제 LAND ---
@@ -679,6 +687,7 @@ class OffboardControl(Node):
                 
         
         elif (self.mission_state == "APPROACHING"):
+            self._log("APPROACHING")
             self.goto_waypoint(self.real_target_x, self.real_target_y, TAKEOFF_HEIGHT, 1)
             if (self.gimbal == 1):
                 self._log("CAM to 70")
@@ -689,11 +698,13 @@ class OffboardControl(Node):
             
             elif (self.is_departed == 1):
                 self._log("Force to CAM to 70")
+                self.publish_gimbal_cmd(True)
                 self.mission_state = "GIMBAL_70"
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
 
         elif (self.mission_state == "GIMBAL_70"):
+            self._log("GIMBAL_70")
             self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 1)
             if self.is_departed == 1:
                 self.is_departed = 0
@@ -701,8 +712,21 @@ class OffboardControl(Node):
                     self._log("TARGET CATCHED USING GIMBAl 70. GO DELIVERY")
                     self.mission_state = "DELIVERY"
                     print("GO TO DELIVERY")
+                
+                else:
+                    self._log("NO DETECT FROM GIMBAL 70")
+                    self.mission_state = "DELIVERY_TEMP"
+
+        elif (self.mission_state == "DELIVERY_TEMP"):
+            self._log("DELIVERY_TEMP")
+            self.goto_waypoint(self.hold_x, self.hold_y, -2, 0.5, 0.1)
+            if self.is_departed == 1:
+                self.is_departed = 0
+                self.delivery_open = True
+                self.mission_state = "DELIVERY_FINISHED"
 
         elif (self.mission_state == "DELIVERY"):
+            self._log("DELIVERY")
             self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -2, 0.5)
             if self.is_departed == 1:
                 self.is_departed = 0
@@ -887,7 +911,6 @@ class OffboardControl(Node):
     def goto_waypoint(self, to_x, to_y, to_z, v_max, stop_sec = 0.1, waypoint_yaw_rel = 999, slow_radius=-1):
         # 1) align yaw (with control yaw speed)
         # 2) move to target based on distance feedback
-
         # yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
         if (slow_radius == -1):
             self.slow_radius = (20.0/9.0) * v_max #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m

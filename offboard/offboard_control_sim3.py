@@ -145,6 +145,9 @@ class OffboardControl(Node):
             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
         self.vehicle_command_publisher = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
+        self.gimbal_publisher = self.create_publisher(
+            Bool, '/camera/gimbal_cmd', qos_profile
+        )
 
         # Create subscribers
         self.vehicle_local_position_subscriber = self.create_subscription(
@@ -322,6 +325,12 @@ class OffboardControl(Node):
         msg.data = bool(flag)
         self.delivery_open_flag_pub.publish(msg)
         self.delivery_open_flag = bool(flag)
+
+    def publish_gimbal_cmd(self, cmd:bool):
+        msg = Bool()
+        msg.data = bool(cmd)
+        self.gimbal_publisher.publish(msg)
+        
 
     def _lerp(self, a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
         return a + t * (b - a)
@@ -523,7 +532,9 @@ class OffboardControl(Node):
 
 
 
-    def timer_callback(self) -> None:
+    def timer_callback(self) -> None: 
+        self.publish_gimbal_cmd(True)
+        self._log("!!")
         """Callback function for the timer."""
         #self.publish_offboard_control_heartbeat_signal(False)
         #print(self.offboard_setpoint_counter)

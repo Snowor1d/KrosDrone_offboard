@@ -32,7 +32,8 @@ setup(
         	'hovering = offboard.offboard_hovering:main',
         	'real = offboard.offboard_control_real:main',
         	'real2 = offboard.offboard_control_real2:main',
-        	'sim2 = offboard.offboard_control_sim2:main',
+        	'real3 = offboard.offboard_control_real3:main',
+            'sim2 = offboard.offboard_control_sim2:main',
         	'sim3 = offboard.offboard_control_sim3:main'
         ],
     },
