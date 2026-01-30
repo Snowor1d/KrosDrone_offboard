@@ -35,7 +35,8 @@ setup(
         	'real3 = offboard.offboard_control_real3:main',
             	'sim2 = offboard.offboard_control_sim2:main',
         	'sim3 = offboard.offboard_control_sim3:main',
-        	'sim4 = offboard.offboard_control_sim4:main'
+        	'sim4 = offboard.offboard_control_sim4:main',
+        	'sim5 = offboard.offboard_control_sim5:main'
         ],
     },
 )
