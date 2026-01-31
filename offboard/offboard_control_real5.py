@@ -11,7 +11,7 @@ import math
 import numpy as np
 import os, time
 from datetime import datetime
-LINE = "line_2"
+LINE = "line_1"
 VELOCITY = 2
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
