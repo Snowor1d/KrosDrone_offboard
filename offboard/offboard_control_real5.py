@@ -7,11 +7,12 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, Bool
 from geometry_msgs.msg import PointStamped
+
 import math
 import numpy as np
 import os, time
 from datetime import datetime
-LINE = "line_1"
+LINE = "line_2"
 VELOCITY = 2
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
@@ -146,10 +147,6 @@ class OffboardControl(Node):
         self.vehicle_command_publisher = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        self.gimbal_publisher = self.create_publisher(
-            Bool, '/camera/gimbal_cmd', 10
-        )
-
         # Create subscribers
         self.vehicle_local_position_subscriber = self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
@@ -168,20 +165,13 @@ class OffboardControl(Node):
             self.target_listener_callback,
             10  # QoS Depth
         )
-        self.gimbal_subscriber = self.create_subscription(
-            Bool,
-            '/camera/gimbal_cmd',
-            self.gimbal_callback,
-            10
-        )
-        
 
         self.lidar_height = float('nan')
         self.delivery_open_flag = False
         self.delivery_open_flag_pub = self.create_publisher(
             Bool, 'delivery_open_flag', 10
         )
-        
+
         self.lidar_height_sub = self.create_subscription(
             Float32, 'lidar_height', self.lidar_height_callback, 10
         )
@@ -200,7 +190,6 @@ class OffboardControl(Node):
         self.dt = 0.1
         self.is_new_go = 0
         self.is_departed = 0
-        self.is_near = 0
         self.wait_in_waypoint = 0
         self.previous_yaw = 0.0
         self.now_yaw = 0
@@ -209,8 +198,6 @@ class OffboardControl(Node):
         self.is_stopping = False
         self.stage_finished = 0
         self.yaw_hold = 0
-        self.yaw_fixed = 0
-        self.gimbal = 0
         
         #PX4 local origin(GPS)
         self.ref_lat = None
@@ -228,8 +215,6 @@ class OffboardControl(Node):
         self.real_target_x = None
         self.real_target_y = None
         self.real_target_z = None
-        self.gimbal_70_target_x = None
-        self.gimbal_70_target_y = None
         self.target_catched = 0
 
         #MAIN GPS -> NED
@@ -237,7 +222,6 @@ class OffboardControl(Node):
 
         self.mission_built = False
         self.mission_state = "BOOT"
-        self.previous_mission_state = "BOOT"
         self.plan = []
         self.plan_idx = 0
         self.is_stopping = False
@@ -252,7 +236,6 @@ class OffboardControl(Node):
         self.init_ready_global = False
         self.offboard_engaged = False
         
-        self.searching_vertices = None
 
         #
         # self.goto_phase = "ALIGN"
@@ -283,6 +266,8 @@ class OffboardControl(Node):
 
         # Create a timer to publish control commands
         self.timer = self.create_timer(0.1, self.timer_callback)
+
+        
         self.hold_active = False
 
         self.last_lidar_time = None
@@ -291,38 +276,17 @@ class OffboardControl(Node):
 
         self._setup_logger()
 
-        self.spiral_center_x = None
-        self.spiral_center_y = None
-        self.spiral_radius_limit = 5.0  # [m]
-        self.spiral_v_radial = 0.0005     # 바깥으로 퍼지는 속도
-        self.spiral_v_tangent = 1.0    # 회전 속도
-        self.spiral_active = False
-
-
-    def gimbal_callback(self, msg:Bool):
-        last_gimbal = self.gimbal
-        self.gimbal = msg.data
-        #print(self.gimbal)
-        if (last_gimbal == 0 and self.gimbal == 1):
-            self._log("gimbal changed")
-            print("gimbal changed !")
-
     def lidar_height_callback(self, msg:Float32):
         self.lidar_height = float(msg.data)
         self.last_lidar_time = self.get_clock().now()
     
-
     def target_listener_callback(self, msg):
         # [핵심 로직] 메시지에서 x, y, z 좌표를 꺼내서 self 변수에 저장
         self.target_x = msg.point.x
         self.target_y = msg.point.y
         self.target_z = msg.point.z
-        if(self.mission_state == "GOTO_2"):
-            self.target_catched += 1
+        self.target_catched += 1
         
-        if(self.mission_state == "GIMBAL_70" or self.mission_state in ["SEARCHING_1", "SEARCHING_2", "SEARCHING_3", "SEARCHING_4", "SEARCHING_5"]):
-            self.gimbal_70_target_x = msg.point.x
-            self.gimbal_70_target_y = msg.point.y
         self.received_first_data = True
 
         # 확인용 로그 출력 (실제 주행 땐 주석 처리 가능)
@@ -330,10 +294,8 @@ class OffboardControl(Node):
             f"Updated Target -> X: {self.target_x:.4f}, Y: {self.target_y:.4f}, Z: {self.target_z:.4f}"
         )
 
-    def publish_gimbal_cmd(self, cmd:bool):
-        msg = Bool()
-        msg.data = bool(cmd)
-        self.gimbal_publisher.publish(msg)
+        # (선택) 여기서 바로 다음 동작(예: 드론 이동 명령)을 실행할 수도 있음
+        # self.move_drone_to_target()
 
     def publish_delivery_open_flag(self, flag:bool):
         msg = Bool()
@@ -392,6 +354,7 @@ class OffboardControl(Node):
                     f"end=({line_end_point[0]:.2f},{line_end_point[1]:.2f},{line_end_point[2]:.2f})"
                 )
             )
+
         return True
 
     def _setup_logger(self):
@@ -443,14 +406,6 @@ class OffboardControl(Node):
             self._log("GOT_REF", extra=f"{lat:.7f},{lon:.7f},{alt:.2f}")
 
             self._build_main_points_ned()
-
-            x = self.lines_ned[LINE]["line_start_point"][0]
-            y = self.lines_ned[LINE]["line_start_point"][1]
-            next_x = self.lines_ned[LINE]["line_end_point"][0]
-            next_y = self.lines_ned[LINE]["line_end_point"][1]
-            yaw = yaw_to_next_xy(x, y, next_x, next_y)
-            self.yaw_fixed = yaw_to_next_xy(x, y, next_x, next_y)
-
     
     def arm(self):
         """Send an arm command to the vehicle."""
@@ -543,7 +498,7 @@ class OffboardControl(Node):
             self.main_pts_ned[name] = ned
             self._log("MAIN_NED", extra=f"{name} -> NED=({ned[0]:.2f},{ned[1]:.2f},{ned[2]:.2f})")
         
-        self._build_vertical_quarter_lines_ned(prestart_m = 10.0)
+        self._build_vertical_quarter_lines_ned(prestart_m = 5.0)
         return True
 
 
@@ -551,7 +506,7 @@ class OffboardControl(Node):
     def timer_callback(self) -> None:
         """Callback function for the timer."""
         #self.publish_offboard_control_heartbeat_signal(False)
-
+        #print(self.offboard_setpoint_counter)
         now = self.get_clock().now()
 
             # --- Lidar failsafe: 2초 이상 수신 없으면 강제 LAND ---
@@ -561,7 +516,7 @@ class OffboardControl(Node):
                 #  즉시 failsafe
                 self._log("NO LIDAR", extra=f"never received-> LAND")
                 self.land()
-                return
+                return 
             elif self.last_lidar_time is None:
                 self._log("WAITING LIDAR")
                 self.offboard_setpoint_counter += 1
@@ -623,45 +578,42 @@ class OffboardControl(Node):
             # target = (10, 0, TAKEOFF_HEIGHT)
             # vel = 2
             # yaw = 0
-            self._log("ALIGN_1")
-            x = self.lines_ned[LINE]["line_start_point"][0]
-            y = self.lines_ned[LINE]["line_start_point"][1]
-            next_x = self.lines_ned[LINE]["line_end_point"][0]
-            next_y = self.lines_ned[LINE]["line_end_point"][1]
-            yaw = yaw_to_next_xy(x, y, next_x, next_y)
-            self.goto_waypoint(self.init_x, self.init_y, TAKEOFF_HEIGHT, VELOCITY, 0.1, self.yaw_fixed)
+            next_x = self.lines_ned[LINE]["line_start_point"][0]
+            next_y = self.lines_ned[LINE]["line_start_point"][1]
+            yaw = yaw_to_next_xy(self.init_x, self.init_y, next_x, next_y)
+            self.goto_waypoint(self.init_x, self.init_y, TAKEOFF_HEIGHT, VELOCITY, 0.1, yaw)
             if self.is_departed == 1:
                 self.mission_state = "GOTO_1"
                 self.is_departed = 0
-                self.is_near = 0
 
         elif (self.mission_state == "GOTO_1"):
             # target = (10, 0, TAKEOFF_HEIGHT)
             # vel = 2
             # yaw = 0
-            self._log("GOTO_1")
-            
             x = self.lines_ned[LINE]["line_start_point"][0]
             y = self.lines_ned[LINE]["line_start_point"][1]
-            next_x = self.lines_ned[LINE]["line_end_point"][0]
-            next_y = self.lines_ned[LINE]["line_end_point"][1]
-            yaw = yaw_to_next_xy(x, y, next_x, next_y)
-            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, 3, 0.1, self.yaw_fixed)
-            if self.is_departed == 1 or self.is_near == 1:
-                self.mission_state = "GOTO_2"
+            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, VELOCITY)
+            if self.is_departed == 1:
+                self.mission_state = "ALIGN_2"
                 self.is_departed = 0
-                self.is_near = 0
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
                 self.hold_z = self.vehicle_odom.position[2]
-
+        elif (self.mission_state == "ALIGN_2"):
+            next_x = self.lines_ned[LINE]["line_end_point"][0]
+            next_y = self.lines_ned[LINE]["line_end_point"][1]
+            yaw = yaw_to_next_xy(self.hold_x, self.hold_y, next_x, next_y)
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 0, 0.1, yaw)
+            if self.is_departed == 1:
+                self.mission_state = "GOTO_2"
+                self.is_departed = 0
+        
         elif (self.mission_state == "GOTO_2"):
-            self._log("GOTO_2")
             x = self.lines_ned[LINE]["line_end_point"][0]
             y = self.lines_ned[LINE]["line_end_point"][1]
-            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
+            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, 1, 0.1)
             if self.is_departed == 1:
-                self.mission_state = "DELIVERY_FINISHED"
+                self.mission_state = "FAILED"
                 self.is_departed = 0
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
@@ -679,159 +631,106 @@ class OffboardControl(Node):
                     yaw = float(self.now_yaw)
                     dir_xy = np.array([math.cos(yaw), math.sin(yaw)], dtype=float)
                 else:
-                    dir_xy = vxy / n  # 정규화된 수평 진행 방향
-                print("NEXT: CATCHED")
+                     dir_xy = vxy / n  # 정규화된 수평 진행 방향
 
                     # 2m 전진 목표점
                 self.hold_x = cx + 2.0 * dir_xy[0]
                 self.hold_y = cy + 2.0 * dir_xy[1]
 
+
         elif (self.mission_state == "CATCHED"):
-            self._log("CATCHED")
-            x = self.lines_ned[LINE]["line_start_point"][0]
-            y = self.lines_ned[LINE]["line_start_point"][1]
-            next_x = self.lines_ned[LINE]["line_end_point"][0]
-            next_y = self.lines_ned[LINE]["line_end_point"][1]
-            yaw = yaw_to_next_xy(x, y, next_x, next_y)
-            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 2, self.yaw_fixed)
-            if (self.is_departed == 1):
-                rx, ry, s = self._pick_offset_point_along_fixed_yaw(self.target_x, self.target_y, offset_m=5.0)
-                self.real_target_x = rx
-                self.real_target_y = ry
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 2)
+            if self.is_departed == 1:
+                self.real_target_x = self.target_x
+                self.real_target_y = self.target_y
+                self.hold_x = self.vehicle_odom.position[0]
+                self.hold_y = self.vehicle_odom.position[1]
+                self.hold_z = self.vehicle_odom.position[2]
+                self._log(f"TARGET UPDATED, {self.real_target_x, self.real_target_y, self.real_target_z}")
+                self.mission_state = "APPROACH_ALIGN"
                 self.is_departed = 0
-                self.mission_state = "APPROACHING"
-                print("NEXT : APPROACHING")
 
-                
+        elif (self.mission_state == "APPROACH_ALIGN"):
+            next_x = self.real_target_x
+            next_y = self.real_target_y
+            yaw = yaw_to_next_xy(self.hold_x, self.hold_y, next_x, next_y)
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 0.1, yaw)
+            self._log("APPROACH_ALIGN")
+            if self.is_departed == 1:
+                self.mission_state = "APPROACH"
+                self.is_departed = 0
         
-        elif (self.mission_state == "APPROACHING"):
-            self._log("APPROACHING")
-            self.goto_waypoint(self.real_target_x, self.real_target_y, TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if (self.gimbal == 1):
-                self._log("CAM to 70")
-                self.mission_state = "GIMBAL_70"
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.hold_yaw = self.now_yaw
-                print("CAM CHANGED TO 70")
-                
-            
-            elif (self.is_departed == 1):
-                self._log("Force to CAM to 70")
-                self.publish_gimbal_cmd(True)
-                self.mission_state = "GIMBAL_70"
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.hold_yaw = self.now_yaw
-
-        elif (self.mission_state == "GIMBAL_70"):
-            self._log("GIMBAL_70")
-            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 1, self.yaw_fixed)
+        elif (self.mission_state == "APPROACH"):
+            self.goto_waypoint(self.real_target_x, self.real_target_y, TAKEOFF_HEIGHT, 1, 1.5)
+            self._log(f"APPROACING to {self.real_target_x, self.real_target_y}")
             if self.is_departed == 1:
+                self.mission_state = "DELIVERY"
                 self.is_departed = 0
-                if (self.gimbal_70_target_x is not None):
-                    self._log("TARGET CATCHED USING GIMBAl 70. GO DELIVERY")
-                    self.mission_state = "DELIVERY"
-                    self.searching_vertices = self.build_rhombus_vertices(self.hold_x, self.hold_y, side_m=5.0)
-                    print("GO TO DELIVERY")
-                
-                else:
-                    self._log("NO DETECT FROM GIMBAL 70")
-                    self.mission_state = "SEARCHING_1"
-                    self.searching_vertices = self.build_rhombus_vertices(self.hold_x, self.hold_y, side_m=5.0)
-
-        elif (self.mission_state == "SEARCHING_1"):
-            self._log("SEARCHING_1")
-            self.previous_mission_state = "SEARCH"
-            self.goto_waypoint(self.searching_vertices[0][0], self.searching_vertices[0][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.mission_state = "SEARCHING_2"
-            if self.gimbal_70_target_x is not None:
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.mission_state = "GIMBAL_70"
-
-        elif (self.mission_state == "SEARCHING_2"):
-            self._log("SEARCHING_2")
-            self.previous_mission_state = "SEARCH"
-            self.goto_waypoint(self.searching_vertices[1][0], self.searching_vertices[1][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.mission_state = "SEARCHING_3"
-            if self.gimbal_70_target_x is not None:
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.mission_state = "GIMBAL_70"
-
-        elif (self.mission_state == "SEARCHING_3"):
-            self._log("SEARCHING_3")
-            self.previous_mission_state = "SEARCH"
-            self.goto_waypoint(self.searching_vertices[2][0], self.searching_vertices[2][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.mission_state = "SEARCHING_4"
-            if self.gimbal_70_target_x is not None:
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.mission_state = "GIMBAL_70"
-
-        elif (self.mission_state == "SEARCHING_4"):
-            self._log("SEARCHING_4")
-            self.previous_mission_state = "SEARCH"
-            self.goto_waypoint(self.searching_vertices[3][0], self.searching_vertices[3][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.mission_state = "SEARCING_5"
-            if self.gimbal_70_target_x is not None:
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.mission_state = "GIMBAL_70"
-
-        elif (self.mission_state == "SEARCHING_5"):
-            self._log("SEARCHING_5")
-            self.goto_waypoint(self.searching_vertices[0][0], self.searching_vertices[0][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.mission_state = "DELIVERY_TEMP"
-            if self.gimbal_70_target_x is not None:
-                self.hold_x = self.vehicle_odom.position[0]
-                self.hold_y = self.vehicle_odom.position[1]
-                self.mission_state = "GIMBAL_70"
+                self.real_target_x = self.target_x
+                self.real_target_y = self.target_y
         
-            
-
-        elif (self.mission_state == "DELIVERY_TEMP"):
-            self._log("DELIVERY_TEMP")
-            self.goto_waypoint(self.target_x, self.target_y, -2, 0.5, 0.1, self.yaw_fixed)
-            if self.is_departed == 1:
-                self.is_departed = 0
-                self.delivery_open = True
-                self.mission_state = "DELIVERY_FINISHED"
-
         elif (self.mission_state == "DELIVERY"):
-            self._log("DELIVERY")
-            self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -2, 0.5, 0.1, self.yaw_fixed)
+            self.goto_waypoint(self.real_target_x, self.real_target_y, -1.5, 0.5, 1)
+            self._log(f"DELIVERYING...")
             if self.is_departed == 1:
+                self.mission_state = "DELIVERY_FINISHED"
                 self.is_departed = 0
                 self.delivery_open = True
-                self.mission_state = "DELIVERY_FINISHED"
-                print("DELIVERY FINISHED")
-        
+
         elif (self.mission_state == "DELIVERY_FINISHED"):
-            self.goto_waypoint(self.init_x, self.init_y, -2, 3, 0.1, self.yaw_fixed)
+            self.goto_waypoint(self.real_target_x, self.real_target_y, TAKEOFF_HEIGHT, 1)
             if self.is_departed == 1:
+                self.mission_state = "BACKTOHOME_ALIGN"
+                self.is_departed = 0
+                self.hold_x = self.vehicle_odom.position[0]
+                self.hold_y = self.vehicle_odom.position[1]
+
+        elif (self.mission_state =="BACKTOHOME_ALIGN"):
+            next_x = self.init_x
+            next_y = self.init_y
+            yaw = yaw_to_next_xy(self.hold_x, self.hold_y, next_x, next_y)
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 0.1, yaw)
+            if self.is_departed == 1:
+                self.mission_state = "BACKTOHOME"
+                self.is_departed = 0
+        elif (self.mission_state =="BACKTOHOME"):
+            self.goto_waypoint(self.init_x, self.init_y, TAKEOFF_HEIGHT, 2, 0)
+            self._log("BACKTOHOME")
+            if (self.is_departed == 1):
                 self.mission_state = "LANDING"
                 self.is_departed = 0
 
-        elif (self.mission_state == "LANDING"):
-            target = (self.init_x, self.init_y, 0)
+                    #self.delivery_open = True
+        elif (self.mission_state == "FAILED"):
+            target = (self.hold_x, self.hold_y, 0)
             vel = 0.5
-            self.goto_waypoint(target[0], target[1], target[2], vel, 0.1, self.yaw_fixed)
+            self.goto_waypoint(target[0], target[1], target[2], vel)
             if (self.vehicle_odom.position[2] > -0.5):
                 self._log("LAND_CMD")
                 self.land()
                 exit(0)
+
+        elif (self.mission_state == "LANDING"):
+            target = (self.init_x, self.init_y, 0)
+            vel = 0.5
+            self.goto_waypoint(target[0], target[1], target[2], vel)
+            if (self.vehicle_odom.position[2] > -0.5):
+                self._log("LAND_CMD")
+                self.land()
+                exit(0)
+
+
+
+        # elif (self.mission_state == "GOTO_2"):
+        #     # target = (10, 0, TAKEOFF_HEIGHT)
+        #     # vel = 2
+        #     # yaw = 0
+        #     self.goto_waypoint(self.init_x, self.init_y, TAKEOFF_HEIGHT, VELOCITY)
+        #     if self.is_departed == 1:
+        #         self.mission_state = "LANDING"
+        #         self.is_departed = 0
+
+
 
 
     def vehicle_odom_callback(self, msg):
@@ -947,74 +846,6 @@ class OffboardControl(Node):
 
         self.trajectory_setpoint_publisher.publish(msg)
 
-    def _pick_offset_point_along_fixed_yaw(self, base_x: float, base_y: float, offset_m: float = 5.0):
-
-        # fixed_yaw 단위벡터
-        u = np.array([math.cos(float(self.yaw_fixed)), math.sin(float(self.yaw_fixed))], dtype=float)
-
-        # 현재 방향 벡터: prev_v_vec(최근 속도) 우선, 없으면 now_yaw
-        vxy = np.array([float(self.prev_v_vec[0]), float(self.prev_v_vec[1])], dtype=float)
-        n = float(np.linalg.norm(vxy))
-        if n < 1e-3:
-            d = np.array([math.cos(float(self.now_yaw)), math.sin(float(self.now_yaw))], dtype=float)
-        else:
-            d = vxy / n
-
-        # 어느 방향(+u / -u)이 현재 방향에 더 가까운지
-        # dot>0 => +u, dot<0 => -u
-        s = 1.0 if float(np.dot(u, d)) >= 0.0 else -1.0
-
-        out_x = float(base_x) + s * float(offset_m) * float(u[0])
-        out_y = float(base_y) + s * float(offset_m) * float(u[1])
-        return out_x, out_y, s
-
-    def build_rhombus_vertices(self, center_x: float, center_y: float, side_m: float = 5.0, use_z: bool = False, center_z: float = 0.0):
-        """
-        중심(center_x, center_y) 기준, 한 변=side_m 인 '마름모(정사각형)' 꼭짓점 4개 반환.
-        - 대각선 방향 1개는 self.yaw_fixed
-        - 다른 대각선은 self.yaw_fixed에 수직(반시계 90도)
-        - line_start_point와 가장 가까운 꼭짓점이 첫 번째
-        - 이후 꼭짓점은 반시계 방향 순서
-        반환: [[x,y], ...] 또는 [[x,y,z], ...] (use_z=True)
-        """
-        yaw = float(self.yaw_fixed)
-
-        # 대각선 방향 단위벡터(u), 수직 단위벡터(v: CCW +90deg)
-        ux, uy = math.cos(yaw), math.sin(yaw)
-        vx, vy = -math.sin(yaw), math.cos(yaw)
-
-        # 정사각형(마름모)에서 중심->꼭짓점 거리 = side / sqrt(2)
-        h = float(side_m) / math.sqrt(2.0)
-
-        c = np.array([float(center_x), float(center_y)], dtype=float)
-        u = np.array([ux, uy], dtype=float)
-        v = np.array([vx, vy], dtype=float)
-
-        # 기본 CCW 순서: +u -> +v -> -u -> -v
-        pts = [
-            (c + h * u),
-            (c + h * v),
-            (c - h * u),
-            (c - h * v),
-        ]
-
-        # line_start_point (NED에서 x,y는 [0]=N, [1]=E 라고 가정)
-        lsp = self.lines_ned[LINE]["line_start_point"]
-        ref = np.array([float(lsp[0]), float(lsp[1])], dtype=float)
-
-        # 가장 가까운 꼭짓점 index 찾기
-        dists = [float(np.linalg.norm(p - ref)) for p in pts]
-        k0 = int(np.argmin(dists))
-
-        # 그 꼭짓점이 첫 번째가 되도록 CCW 리스트 회전
-        pts = pts[k0:] + pts[:k0]
-
-        if use_z:
-            return [[float(p[0]), float(p[1]), float(center_z)] for p in pts]
-        else:
-            return [[float(p[0]), float(p[1])] for p in pts]
-
-
     # def publish_velocity_setpoint(self, t_x: float, t_y: float, t_z: float,
     #                             v: float, yaw_target: float):
     #     cx = float(self.vehicle_odom.position[0])
@@ -1062,6 +893,7 @@ class OffboardControl(Node):
     def goto_waypoint(self, to_x, to_y, to_z, v_max, stop_sec = 0.1, waypoint_yaw_rel = 999, slow_radius=-1):
         # 1) align yaw (with control yaw speed)
         # 2) move to target based on distance feedback
+
         # yaw_target = wrap_to_pi(float(self.ref_yaw) + float(waypoint_yaw_rel))
         if (slow_radius == -1):
             self.slow_radius = (20.0/9.0) * v_max #v_max일때 slow_radius는 5m, v_max가 0.2일때 slow_radius는 1m
@@ -1101,9 +933,7 @@ class OffboardControl(Node):
         dist = math.sqrt(dx*dx + dy*dy + dz*dz)
         self.distance_target = dist
         yaw_err = abs(angle_diff(yaw_target, self.now_yaw))
-        
-        if dist < 5:
-            self.is_near = 1
+
 
         if dist < 1.5 * self.waypoint_range and yaw_err > self.yaw_tol:
             self.publish_yaw_with_hovering(to_x, to_y, to_z, yaw_target)
