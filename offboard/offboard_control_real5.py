@@ -11,7 +11,7 @@ import math
 import numpy as np
 import os, time
 from datetime import datetime
-LINE = "line_2"
+LINE = "line_3"
 VELOCITY = 2
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
@@ -154,7 +154,7 @@ class OffboardControl(Node):
         self.vehicle_local_position_subscriber = self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
         self.vehicle_status_subscriber = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
+            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_profile)
         self.vehicle_odom_subscriber = self.create_subscription(
             VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odom_callback, qos_profile)
         
@@ -231,6 +231,8 @@ class OffboardControl(Node):
         self.real_target_z = None
         self.gimbal_70_target_x = None
         self.gimbal_70_target_y = None
+        self.gimbal_30_target_x = None
+        self.gimbal_30_target_y = None
         self.target_catched = 0
 
         #MAIN GPS -> NED
@@ -323,6 +325,10 @@ class OffboardControl(Node):
         if(self.mission_state == "GIMBAL_70" or self.mission_state in ["SEARCHING_1", "SEARCHING_2", "SEARCHING_3", "SEARCHING_4", "SEARCHING_5"]):
             self.gimbal_70_target_x = msg.point.x
             self.gimbal_70_target_y = msg.point.y
+
+        if(self.mission_state == "APPROACHING_NEXT_CHECK"):
+            self.gimbal_30_target_x = msg.point.x
+            self.gimbal_30_target_y = msg.point.y
         self.received_first_data = True
 
         # 확인용 로그 출력 (실제 주행 땐 주석 처리 가능)
@@ -695,7 +701,7 @@ class OffboardControl(Node):
             yaw = yaw_to_next_xy(x, y, next_x, next_y)
             self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 2, self.yaw_fixed)
             if (self.is_departed == 1):
-                rx, ry, s = self._pick_offset_point_along_fixed_yaw(self.target_x, self.target_y, offset_m=5.0)
+                rx, ry, s = self._pick_offset_point_along_fixed_yaw(self.target_x, self.target_y, offset_m=2.0)
                 self.real_target_x = rx
                 self.real_target_y = ry
                 self.is_departed = 0
@@ -710,7 +716,7 @@ class OffboardControl(Node):
             if (self.gimbal == 1):
                 self.cam_70_counter += 1
                 self._log("CAM to 70")
-                if(self.cam_70_counter > 15):
+                if(self.cam_70_counter > 20):
                     self.mission_state = "GIMBAL_70"
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
@@ -719,12 +725,39 @@ class OffboardControl(Node):
                 
             
             elif (self.is_departed == 1):
-                self._log("Force to CAM to 70")
-                self.publish_gimbal_cmd(True)
-                self.mission_state = "GIMBAL_70"
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
                 self.hold_yaw = self.now_yaw
+                self.is_departed = 0
+                if (self.gimbal_30_target_x is not None):
+                    self._log("Force to CAM to 70")
+                    self.publish_gimbal_cmd(True)
+                    self.mission_state = "SEARCHING_1"
+                    self.searching_vertices = self.build_rhombus_vertices(self.hold_x, self.hold_y, side_m=5.0)
+                else :
+                    self.mission_state = "APPROACHING_NEXT_CHECK"
+
+        
+        elif (self.mission_state == "APPROACHING_NEXT_CHECK"):
+            self._log("APROACHING NEXT CHECKING..")
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 0.5, self.yaw_fixed)
+            if self.is_departed == 1:
+                self.hold_x = self.vehicle_odom.position[0]
+                self.hold_y = self.vehicle_odom.position[1]
+                self.hold_yaw = self.now_yaw
+                self.is_departed = 0
+                if self.gimbal_30_target_x is not None:
+                    self._log("Recalculate target pose using gimbal 30")
+                    rx, ry, s = self._pick_offset_point_along_fixed_yaw(self.target_x, self.target_y, offset_m=2.0)
+                    self.real_target_x = rx
+                    self.real_target_y = ry
+                    self.mission_state = "APPROACHING"
+                    print("NEXT : APPROACHING")
+                else:
+                    self._log("Force to CAM to 70")
+                    self.publish_gimbal_cmd(True)
+                    self.mission_state = "SEARCHING_1"
+                    self.searching_vertices = self.build_rhombus_vertices(self.hold_x, self.hold_y, side_m=5.0)
 
         elif (self.mission_state == "GIMBAL_70"):
             self._log("GIMBAL_70")
@@ -813,7 +846,7 @@ class OffboardControl(Node):
 
         elif (self.mission_state == "DELIVERY"):
             self._log("DELIVERY")
-            self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -2, 0.5, 0.1, self.yaw_fixed)
+            self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -1.3, 0.5, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
                 self.delivery_open = True
