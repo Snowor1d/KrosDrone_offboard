@@ -195,7 +195,7 @@ class OffboardControl(Node):
         self.vehicle_odom = VehicleOdometry()
         self.vehicle_global = VehicleGlobalPosition()
 
-
+        self.cam_70_counter = 0
         self.takeoff_height = TAKEOFF_HEIGHT
         self.dt = 0.1
         self.is_new_go = 0
@@ -708,8 +708,10 @@ class OffboardControl(Node):
             self._log("APPROACHING")
             self.goto_waypoint(self.real_target_x, self.real_target_y, TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
             if (self.gimbal == 1):
+                self.cam_70_counter += 1
                 self._log("CAM to 70")
-                self.mission_state = "GIMBAL_70"
+                if(self.cam_70_counter > 15):
+                    self.mission_state = "GIMBAL_70"
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
                 self.hold_yaw = self.now_yaw
@@ -782,7 +784,7 @@ class OffboardControl(Node):
             self.goto_waypoint(self.searching_vertices[3][0], self.searching_vertices[3][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
-                self.mission_state = "SEARCING_5"
+                self.mission_state = "SEARCHING_5"
             if self.gimbal_70_target_x is not None:
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
