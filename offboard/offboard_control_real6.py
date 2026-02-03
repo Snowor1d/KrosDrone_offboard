@@ -11,7 +11,7 @@ import math
 import numpy as np
 import os, time
 from datetime import datetime
-LINE = "line_3"
+LINE = "line_1"
 VELOCITY = 2
 FLOATING_SPEED = 0.5
 MOVING_SPEED = 1.5
@@ -211,6 +211,7 @@ class OffboardControl(Node):
         self.yaw_hold = 0
         self.yaw_fixed = 0
         self.gimbal = 0
+        self.get_target_pose = 0
         
         #PX4 local origin(GPS)
         self.ref_lat = None
@@ -230,6 +231,8 @@ class OffboardControl(Node):
         self.real_target_z = None
         self.gimbal_70_target_x = None
         self.gimbal_70_target_y = None
+        self.gimbal_70_target_x_list = []
+        self.gimbal_70_target_y_list = []
         self.gimbal_30_target_x = None
         self.gimbal_30_target_y = None
         self.target_catched = 0
@@ -324,6 +327,9 @@ class OffboardControl(Node):
         if(self.mission_state == "GIMBAL_70" or self.mission_state in ["SEARCHING_1", "SEARCHING_2", "SEARCHING_3", "SEARCHING_4", "SEARCHING_5"]):
             self.gimbal_70_target_x = msg.point.x
             self.gimbal_70_target_y = msg.point.y
+            if (self.get_target_pose):
+                self.gimbal_70_target_x_list.append(msg.point.x)
+                self.gimbal_70_target_y_list.append(msg.point.y)
 
         if(self.mission_state == "APPROACHING_NEXT_CHECK"):
             self.gimbal_30_target_x = msg.point.x
@@ -671,7 +677,7 @@ class OffboardControl(Node):
             self._log("GOTO_2")
             x = self.lines_ned[LINE]["line_end_point"][0]
             y = self.lines_ned[LINE]["line_end_point"][1]
-            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
+            self.goto_waypoint(x, y, TAKEOFF_HEIGHT, 1.7, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.mission_state = "DELIVERY_FINISHED"
                 self.is_departed = 0
@@ -722,7 +728,7 @@ class OffboardControl(Node):
             if (self.gimbal == 1):
                 self.cam_70_counter += 1
                 self._log("CAM to 70")
-                if(self.cam_70_counter > 20):
+                if(self.cam_70_counter > 30):
                     self.mission_state = "GIMBAL_70"
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
@@ -767,7 +773,7 @@ class OffboardControl(Node):
 
         elif (self.mission_state == "GIMBAL_70"):
             self._log("GIMBAL_70")
-            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 1, self.yaw_fixed)
+            self.goto_waypoint(self.hold_x, self.hold_y, TAKEOFF_HEIGHT, 1, 2, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
                 if (self.gimbal_70_target_x is not None):
@@ -834,7 +840,7 @@ class OffboardControl(Node):
             self.goto_waypoint(self.searching_vertices[0][0], self.searching_vertices[0][1], TAKEOFF_HEIGHT, 1, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
-                self.mission_state = "DELIVERY_TEMP"
+                self.mission_state = "DELIVERY_FINISHED"
             if self.gimbal_70_target_x is not None:
                 self.hold_x = self.vehicle_odom.position[0]
                 self.hold_y = self.vehicle_odom.position[1]
@@ -844,7 +850,7 @@ class OffboardControl(Node):
 
         elif (self.mission_state == "DELIVERY_TEMP"):
             self._log("DELIVERY_TEMP")
-            self.goto_waypoint(self.target_x, self.target_y, -2, 0.5, 0.1, self.yaw_fixed)
+            self.goto_waypoint(self.target_x, self.target_y, -2, 1, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
                 self.delivery_open = True
@@ -852,7 +858,14 @@ class OffboardControl(Node):
 
         elif (self.mission_state == "DELIVERY"):
             self._log("DELIVERY")
-            self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -1.3, 0.5, 0.1, self.yaw_fixed)
+            if len(self.gimbal_70_target_x_list) == 0:
+                self._log("no information in list")
+                self.goto_waypoint(self.gimbal_70_target_x, self.gimbal_70_target_y, -1.3, 1, 0.1, self.yaw_fixed)
+            else :
+                print(len(self.gimbal_70_target_x_list))
+                avg_x = sum(self.gimbal_70_target_x_list) / len(self.gimbal_70_target_x_list)
+                avg_y = sum(self.gimbal_70_target_y_list) / len(self.gimbal_70_target_y_list)
+                self.goto_waypoint(avg_x, avg_y, -1.3, 1, 0.1, self.yaw_fixed)
             if self.is_departed == 1:
                 self.is_departed = 0
                 self.delivery_open = True
@@ -1151,7 +1164,8 @@ class OffboardControl(Node):
             return
         
         if (dist < self.waypoint_range and yaw_err <= self.yaw_tol):
-
+            if self.mission_state == "GIMBAL_70":
+                self.get_target_pose = 1
             if not self.is_stopping:
                 self.is_stopping = True
                 self.stop_start_time = self.get_clock().now()
